@@ -1,0 +1,23 @@
+app = "multi-agent-relay"
+primary_region = "mad"
+kill_signal = "SIGTERM"
+
+[build]
+  builder = "paketobuildpacks/builder:base"
+
+[mounts]
+  source = "relay_data"
+  destination = "/data"
+
+[[services]]
+  internal_port = 8080
+  protocol = "tcp"
+
+  [[services.http_checks]]
+    path = "/healthz"
+    interval = "15s"
+    timeout = "10s"
+
+  [[services.ports]]
+    handlers = ["tls", "http"]
+    port = 443
