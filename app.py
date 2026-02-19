@@ -109,10 +109,10 @@ def get_message_history(since_timestamp=None):
         logger.error(f"Failed to retrieve history: {e}")
         return []
 
-def health_check(connection, request):
-    """Health check endpoint for Fly.io"""
-    if request.path == "/healthz":
-        return connection.respond(http.HTTPStatus.OK, "OK\n")
+def health_check(path, request_headers):
+    """Health check endpoint for Railway/Fly.io/Render"""
+    if path == "/healthz":
+        return http.HTTPStatus.OK, {}, b"OK\n"
 
 async def send_error(websocket, error_code, error_message, recoverable=True):
     """Send ERROR message to client"""
