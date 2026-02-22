@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-Multi-Agent Relay Server v0.3 - Production Ready for Fly.io
+Multi-Agent Relay Server v0.4 - Production Ready for Railway/Fly.io
 Features:
 - SQLite persistence
 - History retrieval
 - Message queue for offline agents
 - Health check endpoint
 - Graceful shutdown on SIGTERM
+- Room sync: ROOM_LIST on connect, ROOM_CREATED broadcast
+- Agent events: AGENT_JOINED / AGENT_LEFT broadcast
 """
 
 import asyncio
@@ -31,6 +33,9 @@ clients = {}
 
 # Message queue for offline/disconnected agents
 message_queue = defaultdict(list)
+
+# Rooms known to the relay (in-memory, source of truth)
+rooms = {"general"}
 
 # Database setup
 DB_PATH = "/data/relay_server.db"
@@ -200,26 +205,36 @@ async def handle_client(websocket):
                 "relay": True,
                 "persistence": True,
                 "history": True,
-                "message_queue": True
+                "message_queue": True,
+                "rooms": True
             },
             "heartbeat_interval": 30,
-            "connected_agents": len(clients)
+            "connected_agents": list(clients.keys())
         }
         await websocket.send(json.dumps(welcome_msg))
+        
+        # Send current room list to the new client
+        room_list_msg = {
+            "protocol_version": "0.3",
+            "message_type": "ROOM_LIST",
+            "rooms": list(rooms),
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
+        await websocket.send(json.dumps(room_list_msg))
+        logger.info(f"📋 Sent ROOM_LIST ({len(rooms)} rooms) to {client_id}")
         
         # Send queued messages
         await send_queued_messages(websocket, client_id)
         
-        # Announce new agent
-        announcement = {
+        # Broadcast AGENT_JOINED to all other clients
+        agent_joined_msg = {
             "protocol_version": "0.3",
-            "message_type": "MESSAGE",
-            "message_id": f"announce-{client_id}-{int(datetime.now().timestamp())}",
-            "sender": "relay_server",
-            "content": f"🎉 {client_id} joined! Total: {len(clients)}",
+            "message_type": "AGENT_JOINED",
+            "sender": client_id,
             "timestamp": datetime.utcnow().isoformat() + "Z"
         }
-        await broadcast_message(announcement, client_id)
+        await broadcast_message(agent_joined_msg, client_id)
+        logger.info(f"📢 Broadcasted AGENT_JOINED for {client_id}")
         
         # Main message loop
         async for message_raw in websocket:
@@ -245,6 +260,19 @@ async def handle_client(websocket):
                         "timestamp": datetime.utcnow().isoformat() + "Z"
                     }
                     await websocket.send(json.dumps(ack))
+                    
+                    # Check if message introduces a new room
+                    room_name = message.get("room", "general") or "general"
+                    if room_name not in rooms:
+                        rooms.add(room_name)
+                        room_created_msg = {
+                            "protocol_version": "0.3",
+                            "message_type": "ROOM_CREATED",
+                            "room": room_name,
+                            "timestamp": datetime.utcnow().isoformat() + "Z"
+                        }
+                        await broadcast_message(room_created_msg, None)
+                        logger.info(f"🏠 New room created: #{room_name}")
                     
                     # Broadcast
                     await broadcast_message(message, client_id)
@@ -287,11 +315,20 @@ async def handle_client(websocket):
         if client_id and client_id in clients:
             del clients[client_id]
             logger.info(f"Removed {client_id}. Remaining: {len(clients)}")
+            # Broadcast AGENT_LEFT to all remaining clients
+            agent_left_msg = {
+                "protocol_version": "0.3",
+                "message_type": "AGENT_LEFT",
+                "sender": client_id,
+                "timestamp": datetime.utcnow().isoformat() + "Z"
+            }
+            await broadcast_message(agent_left_msg, client_id)
+            logger.info(f"📢 Broadcasted AGENT_LEFT for {client_id}")
 
 async def main():
     """Start the WebSocket server with graceful shutdown"""
     logger.info("=" * 60)
-    logger.info("🚀 Multi-Agent Relay Server v0.3 (Production)")
+    logger.info("🚀 Multi-Agent Relay Server v0.4 (Production)")
     logger.info("=" * 60)
     
     # Initialize database
