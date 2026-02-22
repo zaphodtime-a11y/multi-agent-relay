@@ -55,7 +55,16 @@ def init_database():
                   sender TEXT NOT NULL,
                   content TEXT NOT NULL,
                   timestamp TEXT NOT NULL,
-                  message_type TEXT DEFAULT 'MESSAGE')''')
+                  message_type TEXT DEFAULT 'MESSAGE',
+                  room TEXT DEFAULT 'general')''')
+    
+    # Add room column to existing databases (migration)
+    try:
+        c.execute('ALTER TABLE messages ADD COLUMN room TEXT DEFAULT \'general\'')
+        conn.commit()
+        logger.info("✅ Migrated: added room column to messages")
+    except Exception:
+        pass  # Column already exists
     
     # Presence table
     c.execute('''CREATE TABLE IF NOT EXISTS presence
@@ -67,15 +76,15 @@ def init_database():
     conn.close()
     logger.info("✅ Database initialized")
 
-def store_message(message_id, sender, content, timestamp, message_type='MESSAGE'):
+def store_message(message_id, sender, content, timestamp, message_type='MESSAGE', room='general'):
     """Store message in database"""
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute('''INSERT OR REPLACE INTO messages 
-                    (message_id, sender, content, timestamp, message_type)
-                    VALUES (?, ?, ?, ?, ?)''',
-                 (message_id, sender, content, timestamp, message_type))
+                    (message_id, sender, content, timestamp, message_type, room)
+                    VALUES (?, ?, ?, ?, ?, ?)''',
+                 (message_id, sender, content, timestamp, message_type, room or 'general'))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -88,15 +97,15 @@ def get_message_history(since_timestamp=None):
         c = conn.cursor()
         
         if since_timestamp:
-            c.execute('''SELECT message_id, sender, content, timestamp, message_type
+            c.execute('''SELECT message_id, sender, content, timestamp, message_type, room
                         FROM messages 
                         WHERE timestamp > ? 
                         ORDER BY timestamp ASC''', (since_timestamp,))
         else:
-            c.execute('''SELECT message_id, sender, content, timestamp, message_type
+            c.execute('''SELECT message_id, sender, content, timestamp, message_type, room
                         FROM messages 
                         ORDER BY timestamp ASC 
-                        LIMIT 100''')
+                        LIMIT 500''')
         
         messages = []
         for row in c.fetchall():
@@ -105,7 +114,8 @@ def get_message_history(since_timestamp=None):
                 "sender": row[1],
                 "content": row[2],
                 "timestamp": row[3],
-                "message_type": row[4]
+                "message_type": row[4],
+                "room": row[5] or 'general'
             })
         
         conn.close()
@@ -249,7 +259,8 @@ async def handle_client(websocket):
                         message.get("sender"),
                         message.get("content", ""),
                         message.get("timestamp"),
-                        "MESSAGE"
+                        "MESSAGE",
+                        message.get("room", "general")
                     )
                     
                     # Send ACK
@@ -328,7 +339,7 @@ async def handle_client(websocket):
 async def main():
     """Start the WebSocket server with graceful shutdown"""
     logger.info("=" * 60)
-    logger.info("🚀 Multi-Agent Relay Server v0.4 (Production)")
+    logger.info("🚀 Multi-Agent Relay Server v0.5 (Production)")
     logger.info("=" * 60)
     
     # Initialize database
