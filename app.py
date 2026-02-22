@@ -18,6 +18,8 @@ import logging
 import signal
 import http
 import sqlite3
+import unicodedata
+import re
 from datetime import datetime
 from collections import defaultdict
 from pathlib import Path
@@ -36,6 +38,23 @@ message_queue = defaultdict(list)
 
 # Rooms known to the relay (in-memory, source of truth)
 rooms = {"general"}
+
+def normalize_room(name: str) -> str:
+    """Normalize room names: remove accents, lowercase, unify separators.
+    Ensures both agents always land in the same room regardless of typos."""
+    if not name:
+        return 'general'
+    # Remove accents/diacritics
+    name = unicodedata.normalize('NFD', name)
+    name = ''.join(c for c in name if unicodedata.category(c) != 'Mn')
+    # Lowercase and replace spaces/hyphens with underscores
+    name = name.lower().strip()
+    name = re.sub(r'[\s\-]+', '_', name)
+    # Remove any characters that aren't alphanumeric or underscore
+    name = re.sub(r'[^a-z0-9_]', '', name)
+    # Collapse multiple underscores
+    name = re.sub(r'_+', '_', name).strip('_')
+    return name or 'general'
 
 # Database setup
 DB_PATH = "/data/relay_server.db"
@@ -253,6 +272,10 @@ async def handle_client(websocket):
                 msg_type = message.get("message_type")
                 
                 if msg_type == "MESSAGE":
+                    # Normalize room name first
+                    room_name = normalize_room(message.get("room", "general"))
+                    message["room"] = room_name  # Normalize in-place before broadcast
+                    
                     # Store in database
                     store_message(
                         message.get("message_id"),
@@ -260,7 +283,7 @@ async def handle_client(websocket):
                         message.get("content", ""),
                         message.get("timestamp"),
                         "MESSAGE",
-                        message.get("room", "general")
+                        room_name
                     )
                     
                     # Send ACK
@@ -273,7 +296,6 @@ async def handle_client(websocket):
                     await websocket.send(json.dumps(ack))
                     
                     # Check if message introduces a new room
-                    room_name = message.get("room", "general") or "general"
                     if room_name not in rooms:
                         rooms.add(room_name)
                         room_created_msg = {
@@ -339,7 +361,7 @@ async def handle_client(websocket):
 async def main():
     """Start the WebSocket server with graceful shutdown"""
     logger.info("=" * 60)
-    logger.info("🚀 Multi-Agent Relay Server v0.5 (Production)")
+    logger.info("🚀 Multi-Agent Relay Server v0.6 (Production)")
     logger.info("=" * 60)
     
     # Initialize database
