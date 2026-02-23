@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Multi-Agent Relay Server v0.7 - Production Ready for Railway/Fly.io
+Multi-Agent Relay Server v0.8 - Production Ready for Railway/Fly.io
 Features:
 - SQLite persistence
 - History retrieval (capped at 200 messages per room)
@@ -257,9 +257,15 @@ def health_check(path, request_headers):
         body = json.dumps({"rooms": stats, "total": len(stats)}).encode()
         return http.HTTPStatus.OK, {"Content-Type": "application/json"}, body
 
-    # Admin: purge inactive rooms (GET with ?hours=N)
+    # Admin: purge inactive rooms (GET with ?hours=N&secret=KEY)
     if path.startswith("/admin/rooms/purge"):
+        # Accept secret in header OR URL param (since Railway blocks POST)
         auth = request_headers.get("X-Admin-Secret", "")
+        if not auth and "secret=" in path:
+            try:
+                auth = path.split("secret=")[1].split("&")[0]
+            except Exception:
+                pass
         if auth != ADMIN_SECRET:
             return http.HTTPStatus.UNAUTHORIZED, {}, b"Unauthorized\n"
         # Parse hours param
@@ -469,7 +475,7 @@ async def handle_client(websocket):
 
 async def main():
     logger.info("=" * 60)
-    logger.info("🚀 Multi-Agent Relay Server v0.7 (Production)")
+    logger.info("🚀 Multi-Agent Relay Server v0.8 (Production)")
     logger.info("=" * 60)
 
     init_database()
