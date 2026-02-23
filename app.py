@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Multi-Agent Relay Server v0.8 - Production Ready for Railway/Fly.io
+Multi-Agent Relay Server v0.9 - Production Ready for Railway/Fly.io
 Features:
 - SQLite persistence
-- History retrieval (capped at 200 messages per room)
+- History retrieval (capped at 200 messages per room by default)
+- REQUEST_HISTORY supports optional 'room' and 'limit' params for targeted/fast retrieval
 - Message queue for offline agents
 - Health check endpoint
 - Admin HTTP endpoints: /admin/rooms (GET), /admin/rooms/purge (POST)
@@ -125,27 +126,75 @@ def store_message(message_id, sender, content, timestamp, message_type='MESSAGE'
         logger.error(f"Failed to store message: {e}")
 
 
-def get_message_history(since_timestamp=None):
-    """Retrieve message history — capped at HISTORY_CAP_PER_ROOM per room."""
+def get_message_history(since_timestamp=None, room=None, limit=None):
+    """Retrieve message history.
+    
+    Args:
+        since_timestamp: Only return messages after this timestamp
+        room: If specified, only return messages from this room
+        limit: Max messages to return per room (defaults to HISTORY_CAP_PER_ROOM)
+    """
+    cap = limit if (limit and isinstance(limit, int) and 1 <= limit <= HISTORY_CAP_PER_ROOM) else HISTORY_CAP_PER_ROOM
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
 
         if since_timestamp:
+            if room:
+                room_norm = normalize_room(room)
+                c.execute('''SELECT message_id, sender, content, timestamp, message_type, room
+                            FROM messages 
+                            WHERE timestamp > ? AND room = ?
+                            ORDER BY timestamp ASC''', (since_timestamp, room_norm))
+            else:
+                c.execute('''SELECT message_id, sender, content, timestamp, message_type, room
+                            FROM messages 
+                            WHERE timestamp > ? 
+                            ORDER BY timestamp ASC''', (since_timestamp,))
+            messages = []
+            for row in c.fetchall():
+                messages.append({
+                    "message_id": row[0],
+                    "sender": row[1],
+                    "content": row[2],
+                    "timestamp": row[3],
+                    "message_type": row[4],
+                    "room": row[5] or 'general'
+                })
+            conn.close()
+            return messages
+
+        # No since_timestamp — return last N messages per room
+        if room:
+            # Single room request (fast path for dashboard)
+            room_norm = normalize_room(room)
             c.execute('''SELECT message_id, sender, content, timestamp, message_type, room
-                        FROM messages 
-                        WHERE timestamp > ? 
-                        ORDER BY timestamp ASC''', (since_timestamp,))
+                        FROM messages WHERE room = ?
+                        ORDER BY timestamp DESC LIMIT ?''',
+                     (room_norm, cap))
+            rows = c.fetchall()
+            conn.close()
+            messages = []
+            for row in reversed(rows):
+                messages.append({
+                    "message_id": row[0],
+                    "sender": row[1],
+                    "content": row[2],
+                    "timestamp": row[3],
+                    "message_type": row[4],
+                    "room": row[5] or 'general'
+                })
+            return messages
         else:
-            # Return last HISTORY_CAP_PER_ROOM messages per room
+            # All rooms — return last cap messages per room
             c.execute('''SELECT DISTINCT room FROM messages WHERE room IS NOT NULL''')
             all_rooms = [row[0] for row in c.fetchall()]
             messages = []
-            for room in all_rooms:
+            for r in all_rooms:
                 c.execute('''SELECT message_id, sender, content, timestamp, message_type, room
                             FROM messages WHERE room = ?
                             ORDER BY timestamp DESC LIMIT ?''',
-                         (room, HISTORY_CAP_PER_ROOM))
+                         (r, cap))
                 rows = c.fetchall()
                 for row in reversed(rows):
                     messages.append({
@@ -160,19 +209,6 @@ def get_message_history(since_timestamp=None):
             # Sort all messages by timestamp
             messages.sort(key=lambda m: m["timestamp"])
             return messages
-
-        messages = []
-        for row in c.fetchall():
-            messages.append({
-                "message_id": row[0],
-                "sender": row[1],
-                "content": row[2],
-                "timestamp": row[3],
-                "message_type": row[4],
-                "room": row[5] or 'general'
-            })
-        conn.close()
-        return messages
     except Exception as e:
         logger.error(f"Failed to retrieve history: {e}")
         return []
@@ -428,15 +464,19 @@ async def handle_client(websocket):
 
                 elif msg_type == "REQUEST_HISTORY":
                     since = message.get("since_timestamp")
-                    history = get_message_history(since)
+                    room = message.get("room")  # Optional: filter by specific room
+                    limit = message.get("limit")  # Optional: max messages per room (int)
+                    history = get_message_history(since, room=room, limit=limit)
                     response = {
                         "protocol_version": "0.3",
                         "message_type": "HISTORY_RESPONSE",
                         "messages": history,
+                        "room": room,  # Echo back the requested room for client routing
                         "timestamp": datetime.utcnow().isoformat() + "Z"
                     }
                     await websocket.send(json.dumps(response))
-                    logger.info(f"✅ Sent {len(history)} history messages")
+                    room_label = f"#{room}" if room else "all rooms"
+                    logger.info(f"✅ Sent {len(history)} history messages for {room_label} (limit={limit})")
 
                 elif msg_type == "PING":
                     pong = {
@@ -475,7 +515,7 @@ async def handle_client(websocket):
 
 async def main():
     logger.info("=" * 60)
-    logger.info("🚀 Multi-Agent Relay Server v0.8 (Production)")
+    logger.info("🚀 Multi-Agent Relay Server v0.9 (Production)")
     logger.info("=" * 60)
 
     init_database()
@@ -496,6 +536,7 @@ async def main():
         logger.info("✅ Admin rooms at /admin/rooms (X-Admin-Secret header required)")
         logger.info("✅ Admin purge at /admin/rooms/purge?hours=N")
         logger.info(f"✅ History cap: {HISTORY_CAP_PER_ROOM} messages per room")
+        logger.info("✅ REQUEST_HISTORY supports 'room' and 'limit' params")
         logger.info("=" * 60)
         await stop
         logger.info("🛑 Shutting down gracefully...")
