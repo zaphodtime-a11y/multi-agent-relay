@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Multi-Agent Relay Server v0.9 - Production Ready for Railway/Fly.io
+Multi-Agent Relay Server v1.0 - Production Ready for Railway/Fly.io
 Features:
 - SQLite persistence
 - History retrieval (capped at 200 messages per room by default)
 - REQUEST_HISTORY supports optional 'room' and 'limit' params for targeted/fast retrieval
+- display_name stored in DB and returned in history (no more manus_agent_XXX in dashboard)
 - Message queue for offline agents
 - Health check endpoint
 - Admin HTTP endpoints: /admin/rooms (GET), /admin/rooms/purge (POST)
@@ -77,11 +78,18 @@ def init_database():
                   content TEXT NOT NULL,
                   timestamp TEXT NOT NULL,
                   message_type TEXT DEFAULT 'MESSAGE',
-                  room TEXT DEFAULT 'general')''')
+                  room TEXT DEFAULT 'general',
+                  display_name TEXT)''')
     try:
         c.execute("ALTER TABLE messages ADD COLUMN room TEXT DEFAULT 'general'")
         conn.commit()
         logger.info("✅ Migrated: added room column to messages")
+    except Exception:
+        pass
+    try:
+        c.execute("ALTER TABLE messages ADD COLUMN display_name TEXT")
+        conn.commit()
+        logger.info("✅ Migrated: added display_name column to messages")
     except Exception:
         pass
     c.execute('''CREATE TABLE IF NOT EXISTS presence
@@ -111,15 +119,15 @@ def _load_rooms_from_db():
         logger.error(f"Failed to load rooms: {e}")
 
 
-def store_message(message_id, sender, content, timestamp, message_type='MESSAGE', room='general'):
+def store_message(message_id, sender, content, timestamp, message_type='MESSAGE', room='general', display_name=None):
     """Store message in database"""
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute('''INSERT OR REPLACE INTO messages 
-                    (message_id, sender, content, timestamp, message_type, room)
-                    VALUES (?, ?, ?, ?, ?, ?)''',
-                 (message_id, sender, content, timestamp, message_type, room or 'general'))
+                    (message_id, sender, content, timestamp, message_type, room, display_name)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                 (message_id, sender, content, timestamp, message_type, room or 'general', display_name))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -142,12 +150,12 @@ def get_message_history(since_timestamp=None, room=None, limit=None):
         if since_timestamp:
             if room:
                 room_norm = normalize_room(room)
-                c.execute('''SELECT message_id, sender, content, timestamp, message_type, room
+                c.execute('''SELECT message_id, sender, content, timestamp, message_type, room, display_name
                             FROM messages 
                             WHERE timestamp > ? AND room = ?
                             ORDER BY timestamp ASC''', (since_timestamp, room_norm))
             else:
-                c.execute('''SELECT message_id, sender, content, timestamp, message_type, room
+                c.execute('''SELECT message_id, sender, content, timestamp, message_type, room, display_name
                             FROM messages 
                             WHERE timestamp > ? 
                             ORDER BY timestamp ASC''', (since_timestamp,))
@@ -156,6 +164,7 @@ def get_message_history(since_timestamp=None, room=None, limit=None):
                 messages.append({
                     "message_id": row[0],
                     "sender": row[1],
+                    "display_name": row[6] or row[1],
                     "content": row[2],
                     "timestamp": row[3],
                     "message_type": row[4],
@@ -168,7 +177,7 @@ def get_message_history(since_timestamp=None, room=None, limit=None):
         if room:
             # Single room request (fast path for dashboard)
             room_norm = normalize_room(room)
-            c.execute('''SELECT message_id, sender, content, timestamp, message_type, room
+            c.execute('''SELECT message_id, sender, content, timestamp, message_type, room, display_name
                         FROM messages WHERE room = ?
                         ORDER BY timestamp DESC LIMIT ?''',
                      (room_norm, cap))
@@ -179,6 +188,7 @@ def get_message_history(since_timestamp=None, room=None, limit=None):
                 messages.append({
                     "message_id": row[0],
                     "sender": row[1],
+                    "display_name": row[6] or row[1],
                     "content": row[2],
                     "timestamp": row[3],
                     "message_type": row[4],
@@ -191,7 +201,7 @@ def get_message_history(since_timestamp=None, room=None, limit=None):
             all_rooms = [row[0] for row in c.fetchall()]
             messages = []
             for r in all_rooms:
-                c.execute('''SELECT message_id, sender, content, timestamp, message_type, room
+                c.execute('''SELECT message_id, sender, content, timestamp, message_type, room, display_name
                             FROM messages WHERE room = ?
                             ORDER BY timestamp DESC LIMIT ?''',
                          (r, cap))
@@ -200,6 +210,7 @@ def get_message_history(since_timestamp=None, room=None, limit=None):
                     messages.append({
                         "message_id": row[0],
                         "sender": row[1],
+                        "display_name": row[6] or row[1],
                         "content": row[2],
                         "timestamp": row[3],
                         "message_type": row[4],
@@ -431,6 +442,7 @@ async def handle_client(websocket):
                 if msg_type == "MESSAGE":
                     room_name = normalize_room(message.get("room", "general"))
                     message["room"] = room_name
+                    display_name = message.get("display_name") or message.get("sender")
 
                     store_message(
                         message.get("message_id"),
@@ -438,7 +450,8 @@ async def handle_client(websocket):
                         message.get("content", ""),
                         message.get("timestamp"),
                         "MESSAGE",
-                        room_name
+                        room_name,
+                        display_name
                     )
 
                     ack = {
@@ -537,6 +550,7 @@ async def main():
         logger.info("✅ Admin purge at /admin/rooms/purge?hours=N")
         logger.info(f"✅ History cap: {HISTORY_CAP_PER_ROOM} messages per room")
         logger.info("✅ REQUEST_HISTORY supports 'room' and 'limit' params")
+        logger.info("✅ display_name persisted in DB and returned in history")
         logger.info("=" * 60)
         await stop
         logger.info("🛑 Shutting down gracefully...")
