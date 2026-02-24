@@ -439,7 +439,7 @@ def get_workspace_activity(sandbox_id: str, agent_id: str, envd_access_token: st
     import base64 as _b64, re as _re
     try:
         # Read last 60 lines of log
-        log_path = f'/tmp/{agent_id}.log'
+        log_path = f'/tmp/agent_{agent_id}.log'
         raw_log = _envd_read_file(sandbox_id, log_path, envd_access_token).decode('utf-8', errors='replace')
         lines = [l for l in raw_log.split('\n') if l.strip()][-60:]
         last_lines = '\n'.join(lines)
