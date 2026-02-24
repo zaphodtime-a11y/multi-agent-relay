@@ -746,25 +746,26 @@ def health_check(path, request_headers):
         parts = path.split("?")
         params = urllib.parse.parse_qs(parts[1]) if len(parts) > 1 else {}
         filter_str = params.get('filter', [''])[0].lower()
+        agent_filter = params.get('agent', [''])[0]  # e.g. ?agent=manus_agent_201
         try:
             import urllib.request as _ureq
             mem_url = os.environ.get('MEMORY_SERVER_URL', 'https://memory-server-production-647a.up.railway.app')
             req = _ureq.Request(f"{mem_url}/memory", headers={"Accept": "application/json"})
             with _ureq.urlopen(req, timeout=8) as r:
                 all_mem = json.loads(r.read().decode())
-            # Build display name lookup from AGENT_SANDBOXES
-            display_lookup = {info['sandbox_id']: info['display_name'] for info in AGENT_SANDBOXES.values()}
             agent_display = {aid: info['display_name'] for aid, info in AGENT_SANDBOXES.items()}
             docs = []
             for key, val in all_mem.items():
                 if not isinstance(val, dict):
                     continue
                 # Only show intentional documents: keys starting with 'doc:'
-                # This prevents flooding the panel with thousands of memory entries
                 if not key.startswith('doc:'):
                     continue
                 value = val.get('value', '')
                 agent = val.get('agent', '?')
+                # Filter by agent if specified
+                if agent_filter and agent != agent_filter:
+                    continue
                 # Support both 'ts' (ISO string) and 'updated_at' (float epoch)
                 ts = val.get('ts', '')
                 if not ts:
