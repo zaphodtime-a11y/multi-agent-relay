@@ -323,7 +323,7 @@ os.environ["E2B_API_KEY"] = "{E2B_API_KEY}"
 from e2b import Sandbox
 sbx = Sandbox.connect("{sandbox_id}", api_key="{E2B_API_KEY}")
 try:
-    files = sbx.files.list(directory)
+    files = sbx.files.list("{directory}")
     out = []
     for f in files:
         out.append({{
@@ -357,7 +357,7 @@ os.environ["E2B_API_KEY"] = "{E2B_API_KEY}"
 from e2b import Sandbox
 sbx = Sandbox.connect("{sandbox_id}", api_key="{E2B_API_KEY}")
 try:
-    content = sbx.files.read(path)
+    content = sbx.files.read("{path}")
     print(content)
 except Exception as e:
     print(f"Error reading file: {{e}}")
