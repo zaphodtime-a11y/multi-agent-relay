@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""
-Multi-Agent Relay Server v1.0 - Production Ready for Railway/Fly.io
+"""Multi-Agent Relay Server v1.1 - Production Ready for Railway/Fly.io
 Features:
 - SQLite persistence
 - History retrieval (capped at 200 messages per room by default)
@@ -9,10 +8,11 @@ Features:
 - Message queue for offline agents
 - Health check endpoint
 - Admin HTTP endpoints: /admin/rooms (GET), /admin/rooms/purge (POST)
+- Workspace endpoints: /workspace/{agent_id} (file list), /workspace/{agent_id}/file?path=... (file content), /workspace/{agent_id}/terminal (last log lines)
 - Graceful shutdown on SIGTERM
 - Room sync: ROOM_LIST on connect, ROOM_CREATED broadcast
 - Agent events: AGENT_JOINED / AGENT_LEFT broadcast
-"""
+""""
 
 import asyncio
 import websockets
@@ -23,6 +23,8 @@ import http
 import sqlite3
 import unicodedata
 import re
+import os
+import urllib.parse
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 from pathlib import Path
@@ -44,6 +46,25 @@ rooms = {"general"}
 
 # Admin secret (simple protection)
 ADMIN_SECRET = "relay-admin-2026"
+
+# E2B API key for workspace access
+E2B_API_KEY = os.environ.get('E2B_API_KEY', '')
+
+# Map of agent_id -> sandbox_id (updated dynamically via /workspace/register)
+# Pre-populated with known sandbox IDs
+AGENT_SANDBOXES = {
+    'manus_agent_042': {'sandbox_id': 'i21c45ih8yl020g5kfnmn', 'display_name': 'NOVA'},
+    'manus_agent_043': {'sandbox_id': 'i4170jucfol3ru3fcx6a2', 'display_name': 'SPARK'},
+    'manus_agent_044': {'sandbox_id': 'idnnle3hndtk42dyq3o49', 'display_name': 'LYRA'},
+    'manus_agent_045': {'sandbox_id': 'ipia7ecr7iun5yb290vun', 'display_name': 'KAEL'},
+    'manus_agent_046': {'sandbox_id': 'ik5ustjpx55vhhcgd8ufd', 'display_name': 'MIRA'},
+    'manus_agent_047': {'sandbox_id': 'iny3rga705ax8gqyqolrq', 'display_name': 'ZEN'},
+    'manus_agent_048': {'sandbox_id': 'iqt2z3lof8o5t5w44l6xv', 'display_name': 'FLUX'},
+    'manus_agent_101': {'sandbox_id': 'irobnq33t6mnrn993t0dk', 'display_name': 'SECURI'},
+    'manus_agent_102': {'sandbox_id': 'iibsk5hadqjovru23b24y', 'display_name': 'DATA_S'},
+    'manus_agent_103': {'sandbox_id': 'iw73ydx3wc3wip55i81yq', 'display_name': 'ARCHIT'},
+    'manus_agent_104': {'sandbox_id': 'iqmoujlkxxqjvmohgo43z', 'display_name': 'DEVELO'},
+}
 
 # Max history messages returned per room on connect
 HISTORY_CAP_PER_ROOM = 200
@@ -290,8 +311,90 @@ def purge_inactive_rooms(inactive_hours: int = 24):
         return []
 
 
+def get_workspace_files(sandbox_id: str, directory: str = '/tmp/manus_assets') -> list:
+    """List files in an agent's E2B sandbox workspace."""
+    try:
+        import subprocess, json as _json
+        result = subprocess.run(
+            ['python3', '-c',
+             f'''
+import os, json
+os.environ["E2B_API_KEY"] = "{E2B_API_KEY}"
+from e2b import Sandbox
+sbx = Sandbox.connect("{sandbox_id}", api_key="{E2B_API_KEY}")
+try:
+    files = sbx.files.list("{directory}")
+    out = []
+    for f in files:
+        out.append({{
+            "name": f.name,
+            "path": f.path,
+            "size": f.size,
+            "type": str(f.type).split(".")[-1],
+            "modified": f.modified_time.isoformat() if f.modified_time else ""
+        }})
+    print(json.dumps(out))
+except Exception as e:
+    print(json.dumps([]))
+'''],
+            capture_output=True, text=True, timeout=15
+        )
+        return json.loads(result.stdout.strip() or '[]')
+    except Exception as e:
+        logger.error(f"workspace files error: {e}")
+        return []
+
+
+def get_workspace_file_content(sandbox_id: str, path: str) -> str:
+    """Read a file from an agent's E2B sandbox."""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ['python3', '-c',
+             f'''
+import os
+os.environ["E2B_API_KEY"] = "{E2B_API_KEY}"
+from e2b import Sandbox
+sbx = Sandbox.connect("{sandbox_id}", api_key="{E2B_API_KEY}")
+try:
+    content = sbx.files.read("{path}")
+    print(content)
+except Exception as e:
+    print(f"Error reading file: {{e}}")
+'''],
+            capture_output=True, text=True, timeout=15
+        )
+        return result.stdout
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def get_workspace_terminal(sandbox_id: str, agent_id: str, lines: int = 50) -> str:
+    """Get the last N lines of an agent's terminal log."""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ['python3', '-c',
+             f'''
+import os
+os.environ["E2B_API_KEY"] = "{E2B_API_KEY}"
+from e2b import Sandbox
+sbx = Sandbox.connect("{sandbox_id}", api_key="{E2B_API_KEY}")
+try:
+    r = sbx.commands.run("tail -{lines} /tmp/agent_{agent_id}.log 2>/dev/null", timeout=8)
+    print(r.stdout or "")
+except Exception as e:
+    print(f"Error: {{e}}")
+'''],
+            capture_output=True, text=True, timeout=20
+        )
+        return result.stdout
+    except Exception as e:
+        return f"Error: {e}"
+
+
 def health_check(path, request_headers):
-    """HTTP endpoints: health check + admin room management"""
+    """HTTP endpoints: health check + admin room management + workspace"""
     if path == "/healthz":
         return http.HTTPStatus.OK, {"Content-Type": "text/plain"}, b"OK\n"
 
@@ -330,6 +433,99 @@ def health_check(path, request_headers):
         }).encode()
         logger.info(f"🧹 Admin purge: removed {len(purged)} rooms (inactive > {hours}h)")
         return http.HTTPStatus.OK, {"Content-Type": "application/json"}, body
+
+    # Workspace: list all agents
+    if path == "/workspace":
+        cors = {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"}
+        agents_info = []
+        for agent_id, info in AGENT_SANDBOXES.items():
+            agents_info.append({
+                "agent_id": agent_id,
+                "display_name": info['display_name'],
+                "sandbox_id": info['sandbox_id']
+            })
+        body = json.dumps({"agents": agents_info}).encode()
+        return http.HTTPStatus.OK, cors, body
+
+    # Workspace: list files for an agent
+    # GET /workspace/{agent_id}?dir=/tmp/manus_assets
+    if path.startswith("/workspace/") and "/file" not in path and "/terminal" not in path and "/register" not in path:
+        cors = {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"}
+        parts = path.split("?")
+        agent_id = parts[0].replace("/workspace/", "").strip("/")
+        params = urllib.parse.parse_qs(parts[1]) if len(parts) > 1 else {}
+        directory = params.get('dir', ['/tmp/manus_assets'])[0]
+        if agent_id not in AGENT_SANDBOXES:
+            return http.HTTPStatus.NOT_FOUND, cors, json.dumps({"error": f"Unknown agent: {agent_id}"}).encode()
+        sandbox_id = AGENT_SANDBOXES[agent_id]['sandbox_id']
+        files = get_workspace_files(sandbox_id, directory)
+        body = json.dumps({
+            "agent_id": agent_id,
+            "display_name": AGENT_SANDBOXES[agent_id]['display_name'],
+            "directory": directory,
+            "files": files
+        }).encode()
+        return http.HTTPStatus.OK, cors, body
+
+    # Workspace: read a specific file
+    # GET /workspace/{agent_id}/file?path=/tmp/manus_assets/foo.py
+    if path.startswith("/workspace/") and "/file" in path:
+        cors = {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"}
+        parts = path.split("?")
+        agent_id = parts[0].replace("/workspace/", "").replace("/file", "").strip("/")
+        params = urllib.parse.parse_qs(parts[1]) if len(parts) > 1 else {}
+        file_path = params.get('path', [''])[0]
+        if agent_id not in AGENT_SANDBOXES:
+            return http.HTTPStatus.NOT_FOUND, cors, json.dumps({"error": f"Unknown agent: {agent_id}"}).encode()
+        if not file_path:
+            return http.HTTPStatus.BAD_REQUEST, cors, json.dumps({"error": "Missing path parameter"}).encode()
+        sandbox_id = AGENT_SANDBOXES[agent_id]['sandbox_id']
+        content = get_workspace_file_content(sandbox_id, file_path)
+        body = json.dumps({
+            "agent_id": agent_id,
+            "path": file_path,
+            "content": content
+        }).encode()
+        return http.HTTPStatus.OK, cors, body
+
+    # Workspace: get terminal output (last N lines of agent log)
+    # GET /workspace/{agent_id}/terminal?lines=50
+    if path.startswith("/workspace/") and "/terminal" in path:
+        cors = {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"}
+        parts = path.split("?")
+        agent_id = parts[0].replace("/workspace/", "").replace("/terminal", "").strip("/")
+        params = urllib.parse.parse_qs(parts[1]) if len(parts) > 1 else {}
+        lines = int(params.get('lines', ['50'])[0])
+        if agent_id not in AGENT_SANDBOXES:
+            return http.HTTPStatus.NOT_FOUND, cors, json.dumps({"error": f"Unknown agent: {agent_id}"}).encode()
+        sandbox_id = AGENT_SANDBOXES[agent_id]['sandbox_id']
+        terminal_output = get_workspace_terminal(sandbox_id, agent_id, lines)
+        body = json.dumps({
+            "agent_id": agent_id,
+            "display_name": AGENT_SANDBOXES[agent_id]['display_name'],
+            "lines": lines,
+            "output": terminal_output
+        }).encode()
+        return http.HTTPStatus.OK, cors, body
+
+    # Workspace: register/update sandbox ID for an agent
+    # GET /workspace/register?agent_id=manus_agent_042&sandbox_id=abc123&secret=KEY
+    if path.startswith("/workspace/register"):
+        cors = {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"}
+        parts = path.split("?")
+        params = urllib.parse.parse_qs(parts[1]) if len(parts) > 1 else {}
+        secret = params.get('secret', [''])[0]
+        if secret != ADMIN_SECRET:
+            return http.HTTPStatus.UNAUTHORIZED, cors, json.dumps({"error": "Unauthorized"}).encode()
+        agent_id = params.get('agent_id', [''])[0]
+        sandbox_id = params.get('sandbox_id', [''])[0]
+        display_name = params.get('display_name', [agent_id])[0]
+        if not agent_id or not sandbox_id:
+            return http.HTTPStatus.BAD_REQUEST, cors, json.dumps({"error": "Missing agent_id or sandbox_id"}).encode()
+        AGENT_SANDBOXES[agent_id] = {'sandbox_id': sandbox_id, 'display_name': display_name}
+        logger.info(f"📦 Workspace registered: {agent_id} -> {sandbox_id}")
+        body = json.dumps({"ok": True, "agent_id": agent_id, "sandbox_id": sandbox_id}).encode()
+        return http.HTTPStatus.OK, cors, body
 
 
 async def send_error(websocket, error_code, error_message, recoverable=True):
