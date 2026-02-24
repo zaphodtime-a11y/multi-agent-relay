@@ -928,12 +928,49 @@ async def handle_client(websocket):
             logger.info(f"📢 Broadcasted AGENT_LEFT for {client_id}")
 
 
+def _fetch_envd_tokens_background():
+    """Fetch envd_access_token for all known sandboxes from E2B API at startup.
+    Runs in a background thread so it doesn't block the server from starting."""
+    if not E2B_API_KEY:
+        logger.warning("⚠️  E2B_API_KEY not set — workspace tokens will not be auto-fetched")
+        return
+    import time
+    time.sleep(3)  # Wait for server to fully start
+    logger.info("🔑 Auto-fetching envd tokens for all agents...")
+    try:
+        import subprocess, sys
+        for agent_id, info in list(AGENT_SANDBOXES.items()):
+            sandbox_id = info.get('sandbox_id', '')
+            if not sandbox_id or info.get('envd_access_token'):
+                continue  # Skip if already has token
+            try:
+                result = subprocess.run(
+                    [sys.executable, '-c',
+                     f'import os; os.environ["E2B_API_KEY"]="{E2B_API_KEY}"; '
+                     f'from e2b import Sandbox; sbx=Sandbox.connect("{sandbox_id}"); '
+                     f'print(sbx._SandboxBase__envd_access_token)'],
+                    capture_output=True, text=True, timeout=20
+                )
+                token = result.stdout.strip()
+                if token and len(token) == 64:
+                    AGENT_SANDBOXES[agent_id]['envd_access_token'] = token
+                    logger.info(f"  ✅ {info.get('display_name', agent_id)}: token fetched")
+                else:
+                    logger.warning(f"  ⚠️  {info.get('display_name', agent_id)}: bad token '{token[:20]}...'")
+            except Exception as e:
+                logger.warning(f"  ❌ {info.get('display_name', agent_id)}: {e}")
+    except Exception as e:
+        logger.error(f"Token auto-fetch failed: {e}")
+    logger.info("🔑 Token auto-fetch complete")
+
 async def main():
     logger.info("=" * 60)
     logger.info("🚀 Multi-Agent Relay Server v0.9 (Production)")
     logger.info("=" * 60)
-
     init_database()
+    # Start background token fetch (non-blocking)
+    import threading
+    threading.Thread(target=_fetch_envd_tokens_background, daemon=True).start()
 
     loop = asyncio.get_running_loop()
     stop = loop.create_future()
