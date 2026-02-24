@@ -389,18 +389,38 @@ def get_workspace_terminal(sandbox_id: str, agent_id: str, lines: int = 50, envd
 
 
 def get_workspace_screenshot(sandbox_id: str, envd_access_token: str = '') -> dict:
-    """Get the most recently modified file in the agent's workspace.
-    Uses SDK gRPC for listing and HTTP API for reading file content."""
+    """Get the browser screenshot (browser_view.png) or most recently modified file.
+    Returns image as base64 if it's a PNG, otherwise returns text content."""
+    import base64 as _b64
     try:
         directory = '/tmp/manus_assets'
+        # First try to get browser_view.png specifically
+        browser_view_path = '/tmp/manus_assets/browser_view.png'
+        try:
+            img_bytes = _envd_read_file(sandbox_id, browser_view_path, envd_access_token)
+            return {
+                "type": "image",
+                "path": browser_view_path,
+                "name": "browser_view.png",
+                "content": _b64.b64encode(img_bytes).decode('ascii')
+            }
+        except Exception:
+            pass  # Fall through to most-recent-file approach
+        # Fallback: most recently modified file
         file_list = _envd_list_dir(sandbox_id, directory, envd_access_token)
         file_list = [f for f in file_list if f.get('type') == 'FILE']
         if not file_list:
             return {"type": "empty", "message": "No files in workspace"}
-        # Sort by modified time, get most recent
         latest = sorted(file_list, key=lambda f: f.get('modified', ''), reverse=True)[0]
-        # Read its content via HTTP API
-        content = _envd_read_file(sandbox_id, latest['path'], envd_access_token).decode('utf-8', errors='replace')
+        raw = _envd_read_file(sandbox_id, latest['path'], envd_access_token)
+        if latest['name'].lower().endswith('.png'):
+            return {
+                "type": "image",
+                "path": latest['path'],
+                "name": latest['name'],
+                "content": _b64.b64encode(raw).decode('ascii')
+            }
+        content = raw.decode('utf-8', errors='replace')
         return {
             "type": "file",
             "path": latest['path'],
