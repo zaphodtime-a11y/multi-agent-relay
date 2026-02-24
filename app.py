@@ -1010,7 +1010,9 @@ async def main():
         host="",
         port=8080,
         process_request=health_check,
-        max_size=20 * 1024 * 1024  # 20MB max message size
+        max_size=20 * 1024 * 1024,  # 20MB max message size
+        ping_interval=30,   # Send ping every 30s
+        ping_timeout=120,   # Allow 120s for pong (agents busy browsing)
     ):
         logger.info("✅ Server running on port 8080")
         logger.info("✅ Health check at /healthz")
