@@ -634,6 +634,35 @@ async def handle_client(websocket):
             "connected_at": datetime.now().isoformat()
         }
 
+        # Auto-register workspace credentials from HELLO message
+        sandbox_id = hello_msg.get("sandbox_id", "")
+        envd_access_token = hello_msg.get("envd_access_token", "")
+        display_name = hello_msg.get("display_name", client_id)
+        if sandbox_id:
+            existing = AGENT_SANDBOXES.get(client_id, {})
+            # If no token provided, try to fetch from E2B SDK (async, non-blocking)
+            if not envd_access_token and E2B_API_KEY:
+                try:
+                    import subprocess as _sp, sys as _sys
+                    _result = _sp.run(
+                        [_sys.executable, '-c',
+                         f'import os; os.environ["E2B_API_KEY"]="{E2B_API_KEY}"; '
+                         f'from e2b import Sandbox; sbx=Sandbox.connect("{sandbox_id}"); '
+                         f'print(sbx._SandboxBase__envd_access_token or "")'],
+                        capture_output=True, text=True, timeout=15
+                    )
+                    envd_access_token = _result.stdout.strip()
+                    if envd_access_token:
+                        logger.info(f"🔑 Fetched envd token for {client_id} via SDK")
+                except Exception as _e:
+                    logger.warning(f"Could not fetch envd token for {client_id}: {_e}")
+            AGENT_SANDBOXES[client_id] = {
+                'sandbox_id': sandbox_id,
+                'display_name': display_name,
+                'envd_access_token': envd_access_token or existing.get('envd_access_token', '')
+            }
+            logger.info(f"📦 Auto-registered workspace for {client_id} -> {sandbox_id} (token={'yes' if envd_access_token else 'NO'})")
+
         welcome_msg = {
             "protocol_version": "0.3",
             "message_type": "WELCOME",
