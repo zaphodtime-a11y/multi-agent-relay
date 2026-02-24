@@ -329,21 +329,28 @@ def _envd_read_file(sandbox_id: str, path: str, envd_access_token: str = '') -> 
 
 
 def _envd_list_dir(sandbox_id: str, directory: str, envd_access_token: str = '') -> list:
-    """List files in a directory using E2B SDK (gRPC-based, works with access token)."""
+    """List files in a directory using envd gRPC HTTP API (connect protocol, fast)."""
     try:
-        import os as _os
-        _os.environ['E2B_API_KEY'] = E2B_API_KEY
-        from e2b import Sandbox
-        sbx = Sandbox.connect(sandbox_id)
-        items = sbx.files.list(directory)
+        import urllib.request
+        url = f"{_envd_url(sandbox_id)}/filesystem.Filesystem/ListDir"
+        body = json.dumps({'path': directory}).encode()
+        headers = {
+            'Content-Type': 'application/json',
+            'Connect-Protocol-Version': '1'
+        }
+        if envd_access_token:
+            headers['X-Access-Token'] = envd_access_token
+        req = urllib.request.Request(url, data=body, headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
         result = []
-        for f in items:
+        for f in data.get('entries', []):
             result.append({
-                'name': f.name,
-                'path': f.path,
-                'size': getattr(f, 'size', 0) or 0,
-                'type': 'FILE' if str(f.type).endswith('FILE') else 'DIR',
-                'modified': f.modified_time.isoformat() if getattr(f, 'modified_time', None) else ''
+                'name': f.get('name', ''),
+                'path': f.get('path', ''),
+                'size': int(f.get('size', 0)),
+                'type': 'FILE' if f.get('type') == 'FILE_TYPE_FILE' else 'DIR',
+                'modified': f.get('modifiedTime', '')
             })
         return result
     except Exception as e:
