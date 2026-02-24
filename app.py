@@ -311,135 +311,95 @@ def purge_inactive_rooms(inactive_hours: int = 24):
         return []
 
 
+def _envd_url(sandbox_id: str) -> str:
+    """Return the envd HTTP API base URL for a sandbox."""
+    return f"https://49983-{sandbox_id}.e2b.app"
+
+
+def _envd_headers() -> dict:
+    """Return auth headers for envd API."""
+    return {"X-API-Key": E2B_API_KEY}
+
+
 def get_workspace_files(sandbox_id: str, directory: str = '/tmp/manus_assets') -> list:
-    """List files in an agent's E2B sandbox workspace."""
+    """List files in an agent's E2B sandbox workspace via direct envd HTTP API."""
     try:
-        import subprocess, json as _json
-        result = subprocess.run(
-            ['python3', '-c',
-             f'''
-import os, json
-os.environ["E2B_API_KEY"] = "{E2B_API_KEY}"
-from e2b import Sandbox
-sbx = Sandbox.connect("{sandbox_id}", api_key="{E2B_API_KEY}")
-try:
-    files = sbx.files.list("{directory}")
-    out = []
-    for f in files:
-        out.append({{
-            "name": f.name,
-            "path": f.path,
-            "size": f.size,
-            "type": str(f.type).split(".")[-1],
-            "modified": f.modified_time.isoformat() if f.modified_time else ""
-        }})
-    print(json.dumps(out))
-except Exception as e:
-    print(json.dumps([]))
-'''],
-            capture_output=True, text=True, timeout=15
-        )
-        return json.loads(result.stdout.strip() or '[]')
+        import urllib.request
+        url = f"{_envd_url(sandbox_id)}/files?path={urllib.parse.quote(directory)}"
+        req = urllib.request.Request(url, headers=_envd_headers())
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        out = []
+        for f in (data if isinstance(data, list) else []):
+            out.append({
+                "name": f.get("name", ""),
+                "path": f.get("path", ""),
+                "size": f.get("size", 0),
+                "type": "FILE" if f.get("type") == "file" else "DIR",
+                "modified": f.get("lastModified", "")
+            })
+        return out
     except Exception as e:
         logger.error(f"workspace files error: {e}")
         return []
 
 
 def get_workspace_file_content(sandbox_id: str, path: str) -> str:
-    """Read a file from an agent's E2B sandbox."""
+    """Read a file from an agent's E2B sandbox via direct envd HTTP API."""
     try:
-        import subprocess
-        result = subprocess.run(
-            ['python3', '-c',
-             f'''
-import os
-os.environ["E2B_API_KEY"] = "{E2B_API_KEY}"
-from e2b import Sandbox
-sbx = Sandbox.connect("{sandbox_id}", api_key="{E2B_API_KEY}")
-try:
-    content = sbx.files.read("{path}")
-    print(content)
-except Exception as e:
-    print(f"Error reading file: {{e}}")
-'''],
-            capture_output=True, text=True, timeout=15
-        )
-        return result.stdout
+        import urllib.request
+        url = f"{_envd_url(sandbox_id)}/files?path={urllib.parse.quote(path)}"
+        req = urllib.request.Request(url, headers=_envd_headers())
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.read().decode('utf-8', errors='replace')
     except Exception as e:
         return f"Error: {e}"
 
 
 def get_workspace_terminal(sandbox_id: str, agent_id: str, lines: int = 50) -> str:
-    """Get the last N lines of an agent's terminal log via files.read (no commands.run needed)."""
+    """Get the last N lines of an agent's terminal log via direct envd HTTP API."""
     try:
-        import subprocess
-        result = subprocess.run(
-            ['python3', '-c',
-             f'''
-import os
-os.environ["E2B_API_KEY"] = "{E2B_API_KEY}"
-from e2b import Sandbox
-sbx = Sandbox.connect("{sandbox_id}", api_key="{E2B_API_KEY}")
-try:
-    content = sbx.files.read("/tmp/agent_{agent_id}.log")
-    log_lines = content.split("\\n")
-    print("\\n".join(log_lines[-{lines}:]))
-except Exception as e:
-    print(f"Error: {{e}}")
-'''],
-            capture_output=True, text=True, timeout=20
-        )
-        return result.stdout
+        import urllib.request
+        log_path = f"/tmp/agent_{agent_id}.log"
+        url = f"{_envd_url(sandbox_id)}/files?path={urllib.parse.quote(log_path)}"
+        req = urllib.request.Request(url, headers=_envd_headers())
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            content = resp.read().decode('utf-8', errors='replace')
+        log_lines = content.split('\n')
+        return '\n'.join(log_lines[-lines:])
     except Exception as e:
         return f"Error: {e}"
 
 
 def get_workspace_screenshot(sandbox_id: str) -> dict:
-    """Get the last file written by the agent and return its content for display.
-    Since agent sandboxes are headless (no X11/scrot), we return the most recently
-    modified file content as a 'live view' of what the agent is working on."""
+    """Get the most recently modified file in the agent's workspace via direct envd HTTP API.
+    Since agent sandboxes are headless (no X11/scrot), we return the latest file content
+    as a 'live view' of what the agent is working on."""
     try:
-        import subprocess
-        result = subprocess.run(
-            ['python3', '-c',
-             f'''
-import os, json, base64
-os.environ["E2B_API_KEY"] = "{E2B_API_KEY}"
-from e2b import Sandbox
-sbx = Sandbox.connect("{sandbox_id}", api_key="{E2B_API_KEY}")
-try:
-    files = sbx.files.list("/tmp/manus_assets")
-    if not files:
-        print(json.dumps({{"type": "empty", "message": "No files in workspace"}}))
-    else:
-        # Sort by modified time, get most recent non-directory file
-        file_list = [f for f in files if str(f.type).endswith("FILE")]
+        import urllib.request
+        # List files
+        url = f"{_envd_url(sandbox_id)}/files?path={urllib.parse.quote('/tmp/manus_assets')}"
+        req = urllib.request.Request(url, headers=_envd_headers())
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        file_list = [f for f in (data if isinstance(data, list) else []) if f.get('type') == 'file']
         if not file_list:
-            print(json.dumps({{"type": "empty", "message": "No files in workspace"}}))
-        else:
-            latest = sorted(file_list, key=lambda f: f.modified_time or "", reverse=True)[0]
-            content = sbx.files.read(latest.path)
-            print(json.dumps({{
-                "type": "file",
-                "path": latest.path,
-                "name": latest.name,
-                "size": latest.size,
-                "modified": latest.modified_time.isoformat() if latest.modified_time else "",
-                "content": content[:8000]  # cap at 8KB
-            }}))
-except Exception as e:
-    print(json.dumps({{"type": "error", "message": str(e)}}))
-'''],
-            capture_output=True, text=True, timeout=25
-        )
-        import json as _json
-        out = result.stdout.strip()
-        if out:
-            try:
-                return _json.loads(out)
-            except Exception:
-                return {"type": "error", "message": out[:200]}
-        return {"type": "error", "message": "No output from sandbox"}
+            return {"type": "empty", "message": "No files in workspace"}
+        # Sort by lastModified, get most recent
+        latest = sorted(file_list, key=lambda f: f.get('lastModified', ''), reverse=True)[0]
+        # Read its content
+        content_url = f"{_envd_url(sandbox_id)}/files?path={urllib.parse.quote(latest['path'])}"
+        req2 = urllib.request.Request(content_url, headers=_envd_headers())
+        with urllib.request.urlopen(req2, timeout=10) as resp2:
+            content = resp2.read().decode('utf-8', errors='replace')
+        return {
+            "type": "file",
+            "path": latest['path'],
+            "name": latest['name'],
+            "size": latest.get('size', 0),
+            "modified": latest.get('lastModified', ''),
+            "content": content[:8000]
+        }
     except Exception as e:
         return {"type": "error", "message": str(e)}
 
