@@ -759,18 +759,30 @@ def health_check(path, request_headers):
             for key, val in all_mem.items():
                 if not isinstance(val, dict):
                     continue
+                # Only show intentional documents: keys starting with 'doc:'
+                # This prevents flooding the panel with thousands of memory entries
+                if not key.startswith('doc:'):
+                    continue
                 value = val.get('value', '')
                 agent = val.get('agent', '?')
+                # Support both 'ts' (ISO string) and 'updated_at' (float epoch)
                 ts = val.get('ts', '')
-                is_doc = len(value) > 200 or value.strip().startswith('#') or value.strip().startswith('{')
-                if not is_doc:
+                if not ts:
+                    updated_at = val.get('updated_at', 0)
+                    if updated_at:
+                        from datetime import datetime, timezone
+                        ts = datetime.fromtimestamp(updated_at, tz=timezone.utc).isoformat()
+                if not value or len(value) < 10:
                     continue
                 if filter_str and filter_str not in key.lower() and filter_str not in value.lower()[:500]:
                     continue
                 display = agent_display.get(agent, agent)
-                doc_type = 'markdown' if value.strip().startswith('#') else ('json' if value.strip().startswith('{') else 'text')
+                # Derive a friendly title from the key (strip 'doc:' prefix)
+                title = key[4:].replace('_', ' ').replace('-', ' ').title()
+                doc_type = 'markdown' if (value.strip().startswith('#') or key.endswith('.md')) else ('json' if value.strip().startswith('{') else 'text')
                 docs.append({
                     'key': key,
+                    'title': title,
                     'agent': agent,
                     'display_name': display,
                     'ts': ts,
