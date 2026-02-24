@@ -393,6 +393,37 @@ except Exception as e:
         return f"Error: {e}"
 
 
+def get_workspace_screenshot(sandbox_id: str) -> dict:
+    """Take a screenshot of the agent's sandbox and return as base64 PNG."""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ['python3', '-c',
+             f'''
+import os, base64
+os.environ["E2B_API_KEY"] = "{E2B_API_KEY}"
+from e2b import Sandbox
+sbx = Sandbox.connect("{sandbox_id}", api_key="{E2B_API_KEY}")
+try:
+    r = sbx.commands.run("scrot -z /tmp/_screenshot.png 2>/dev/null && base64 -w0 /tmp/_screenshot.png 2>/dev/null", timeout=10)
+    if r.stdout and len(r.stdout) > 100:
+        print("OK:" + r.stdout.strip())
+    else:
+        print("NOSCREEN")
+except Exception as e:
+    print(f"ERROR:{{e}}")
+'''],
+            capture_output=True, text=True, timeout=25
+        )
+        out = result.stdout.strip()
+        if out.startswith("OK:"):
+            return {"type": "screenshot", "format": "png", "data": out[3:]}
+        else:
+            return {"type": "error", "message": out}
+    except Exception as e:
+        return {"type": "error", "message": str(e)}
+
+
 def health_check(path, request_headers):
     """HTTP endpoints: health check + admin room management + workspace"""
     if path == "/healthz":
@@ -508,6 +539,21 @@ def health_check(path, request_headers):
         }).encode()
         return http.HTTPStatus.OK, cors, body
 
+    # Workspace: screenshot of agent sandbox
+    # GET /workspace/{agent_id}/screenshot
+    if path.startswith("/workspace/") and "/screenshot" in path:
+        cors = {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"}
+        agent_id = path.replace("/workspace/", "").replace("/screenshot", "").strip("/").split("?")[0]
+        if agent_id not in AGENT_SANDBOXES:
+            return http.HTTPStatus.NOT_FOUND, cors, json.dumps({"error": f"Unknown agent: {agent_id}"}).encode()
+        sandbox_id = AGENT_SANDBOXES[agent_id]['sandbox_id']
+        result = get_workspace_screenshot(sandbox_id)
+        body = json.dumps({
+            "agent_id": agent_id,
+            "display_name": AGENT_SANDBOXES[agent_id]['display_name'],
+            **result
+        }).encode()
+        return http.HTTPStatus.OK, cors, body
     # Workspace: register/update sandbox ID for an agent
     # GET /workspace/register?agent_id=manus_agent_042&sandbox_id=abc123&secret=KEY
     if path.startswith("/workspace/register"):
