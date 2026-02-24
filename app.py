@@ -452,10 +452,25 @@ def get_workspace_activity(sandbox_id: str, agent_id: str, envd_access_token: st
 
         # Extract last few step lines for the step log
         step_lines = []
-        for line in lines[-20:]:
-            if 'Ejecutando:' in line or '[SENT' in line or 'LLM [' in line or '[RECONECT]' in line:
+        for line in lines[-30:]:
+            if any(kw in line for kw in ['Ejecutando:', '[SENT', 'LLM [', '[RECONECT]', 'Escrito:', 'DOC SYNC', 'Follow-up', 'TRUNCADO', 'Conectando']):
                 # Clean timestamp
                 clean = _re.sub(r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+ ', '', line).strip()
+                # Format nicely for terminal display
+                if 'Ejecutando: browse' in clean:
+                    clean = '🌐 ' + clean
+                elif 'Ejecutando: search' in clean:
+                    clean = '🔍 ' + clean
+                elif 'Ejecutando: write' in clean or 'Escrito:' in clean:
+                    clean = '✏️ ' + clean
+                elif 'DOC SYNC' in clean:
+                    clean = '📄 ' + clean
+                elif 'LLM [' in clean:
+                    clean = '🧠 ' + clean
+                elif '[SENT' in clean:
+                    clean = '💬 ' + clean
+                elif '[RECONECT]' in clean:
+                    clean = '🔄 ' + clean
                 step_lines.append(clean)
 
         # Determine current mode from most recent action
@@ -499,9 +514,10 @@ def get_workspace_activity(sandbox_id: str, agent_id: str, envd_access_token: st
 
         result = {
             'mode': mode,
-            'step_log': step_lines[-10:],
+            'step_log': step_lines[-15:],
             'current_url': current_url,
             'current_file': current_file,
+            'terminal_output': '\n'.join(step_lines[-20:]),  # Always provide terminal output from step log
         }
 
         # If browse mode, try to get browser screenshot
