@@ -739,6 +739,72 @@ def health_check(path, request_headers):
         body = json.dumps({"ok": True, "agent_id": agent_id, "sandbox_id": sandbox_id}).encode()
         return http.HTTPStatus.OK, cors, body
 
+    # Documents: list all documents created by agents from the Memory Server
+    # GET /documents?filter=mettis
+    if path.startswith("/documents"):
+        cors = {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"}
+        parts = path.split("?")
+        params = urllib.parse.parse_qs(parts[1]) if len(parts) > 1 else {}
+        filter_str = params.get('filter', [''])[0].lower()
+        try:
+            import urllib.request as _ureq
+            mem_url = os.environ.get('MEMORY_SERVER_URL', 'https://memory-server-production-647a.up.railway.app')
+            req = _ureq.Request(f"{mem_url}/memory", headers={"Accept": "application/json"})
+            with _ureq.urlopen(req, timeout=8) as r:
+                all_mem = json.loads(r.read().decode())
+            # Build display name lookup from AGENT_SANDBOXES
+            display_lookup = {info['sandbox_id']: info['display_name'] for info in AGENT_SANDBOXES.values()}
+            agent_display = {aid: info['display_name'] for aid, info in AGENT_SANDBOXES.items()}
+            docs = []
+            for key, val in all_mem.items():
+                if not isinstance(val, dict):
+                    continue
+                value = val.get('value', '')
+                agent = val.get('agent', '?')
+                ts = val.get('ts', '')
+                is_doc = len(value) > 200 or value.strip().startswith('#') or value.strip().startswith('{')
+                if not is_doc:
+                    continue
+                if filter_str and filter_str not in key.lower() and filter_str not in value.lower()[:500]:
+                    continue
+                display = agent_display.get(agent, agent)
+                doc_type = 'markdown' if value.strip().startswith('#') else ('json' if value.strip().startswith('{') else 'text')
+                docs.append({
+                    'key': key,
+                    'agent': agent,
+                    'display_name': display,
+                    'ts': ts,
+                    'type': doc_type,
+                    'preview': value[:300],
+                    'size': len(value)
+                })
+            docs.sort(key=lambda x: x.get('ts', ''), reverse=True)
+            body = json.dumps({'total': len(docs), 'documents': docs[:100]}).encode()
+            return http.HTTPStatus.OK, cors, body
+        except Exception as e:
+            body = json.dumps({'error': str(e), 'documents': []}).encode()
+            return http.HTTPStatus.OK, cors, body
+
+    # Documents: get full content of a specific document
+    # GET /document/{key}
+    if path.startswith("/document/"):
+        cors = {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"}
+        key = urllib.parse.unquote(path.replace("/document/", "").split("?")[0])
+        try:
+            import urllib.request as _ureq
+            mem_url = os.environ.get('MEMORY_SERVER_URL', 'https://memory-server-production-647a.up.railway.app')
+            req = _ureq.Request(f"{mem_url}/memory/{urllib.parse.quote(key)}", headers={"Accept": "application/json"})
+            with _ureq.urlopen(req, timeout=8) as r:
+                item = json.loads(r.read().decode())
+            value = item.get('value', '') if isinstance(item, dict) else str(item)
+            agent = item.get('agent', '?') if isinstance(item, dict) else '?'
+            agent_display = {aid: info['display_name'] for aid, info in AGENT_SANDBOXES.items()}
+            display = agent_display.get(agent, agent)
+            body = json.dumps({'key': key, 'agent': agent, 'display_name': display, 'ts': item.get('ts','') if isinstance(item,dict) else '', 'content': value}).encode()
+            return http.HTTPStatus.OK, cors, body
+        except Exception as e:
+            body = json.dumps({'error': str(e)}).encode()
+            return http.HTTPStatus.NOT_FOUND, cors, body
 
 async def send_error(websocket, error_code, error_message, recoverable=True):
     error = {
