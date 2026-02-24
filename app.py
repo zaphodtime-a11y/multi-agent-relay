@@ -370,7 +370,7 @@ except Exception as e:
 
 
 def get_workspace_terminal(sandbox_id: str, agent_id: str, lines: int = 50) -> str:
-    """Get the last N lines of an agent's terminal log."""
+    """Get the last N lines of an agent's terminal log via files.read (no commands.run needed)."""
     try:
         import subprocess
         result = subprocess.run(
@@ -381,8 +381,9 @@ os.environ["E2B_API_KEY"] = "{E2B_API_KEY}"
 from e2b import Sandbox
 sbx = Sandbox.connect("{sandbox_id}", api_key="{E2B_API_KEY}")
 try:
-    r = sbx.commands.run("tail -{lines} /tmp/agent_{agent_id}.log 2>/dev/null", timeout=8)
-    print(r.stdout or "")
+    content = sbx.files.read("/tmp/agent_{agent_id}.log")
+    log_lines = content.split("\\n")
+    print("\\n".join(log_lines[-{lines}:]))
 except Exception as e:
     print(f"Error: {{e}}")
 '''],
@@ -394,32 +395,51 @@ except Exception as e:
 
 
 def get_workspace_screenshot(sandbox_id: str) -> dict:
-    """Take a screenshot of the agent's sandbox and return as base64 PNG."""
+    """Get the last file written by the agent and return its content for display.
+    Since agent sandboxes are headless (no X11/scrot), we return the most recently
+    modified file content as a 'live view' of what the agent is working on."""
     try:
         import subprocess
         result = subprocess.run(
             ['python3', '-c',
              f'''
-import os, base64
+import os, json, base64
 os.environ["E2B_API_KEY"] = "{E2B_API_KEY}"
 from e2b import Sandbox
 sbx = Sandbox.connect("{sandbox_id}", api_key="{E2B_API_KEY}")
 try:
-    r = sbx.commands.run("scrot -z /tmp/_screenshot.png 2>/dev/null && base64 -w0 /tmp/_screenshot.png 2>/dev/null", timeout=10)
-    if r.stdout and len(r.stdout) > 100:
-        print("OK:" + r.stdout.strip())
+    files = sbx.files.list("/tmp/manus_assets")
+    if not files:
+        print(json.dumps({{"type": "empty", "message": "No files in workspace"}}))
     else:
-        print("NOSCREEN")
+        # Sort by modified time, get most recent non-directory file
+        file_list = [f for f in files if str(f.type).endswith("FILE")]
+        if not file_list:
+            print(json.dumps({{"type": "empty", "message": "No files in workspace"}}))
+        else:
+            latest = sorted(file_list, key=lambda f: f.modified_time or "", reverse=True)[0]
+            content = sbx.files.read(latest.path)
+            print(json.dumps({{
+                "type": "file",
+                "path": latest.path,
+                "name": latest.name,
+                "size": latest.size,
+                "modified": latest.modified_time.isoformat() if latest.modified_time else "",
+                "content": content[:8000]  # cap at 8KB
+            }}))
 except Exception as e:
-    print(f"ERROR:{{e}}")
+    print(json.dumps({{"type": "error", "message": str(e)}}))
 '''],
             capture_output=True, text=True, timeout=25
         )
+        import json as _json
         out = result.stdout.strip()
-        if out.startswith("OK:"):
-            return {"type": "screenshot", "format": "png", "data": out[3:]}
-        else:
-            return {"type": "error", "message": out}
+        if out:
+            try:
+                return _json.loads(out)
+            except Exception:
+                return {"type": "error", "message": out[:200]}
+        return {"type": "error", "message": "No output from sandbox"}
     except Exception as e:
         return {"type": "error", "message": str(e)}
 
