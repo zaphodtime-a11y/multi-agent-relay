@@ -316,17 +316,32 @@ def _envd_url(sandbox_id: str) -> str:
     return f"https://49983-{sandbox_id}.e2b.app"
 
 
-def _envd_headers() -> dict:
-    """Return auth headers for envd API."""
-    return {"X-API-Key": E2B_API_KEY}
+def _envd_signed_url(sandbox_id: str, path: str, envd_access_token: str, operation: str = 'read') -> str:
+    """Generate a signed URL for the envd HTTP API (required for authenticated sandboxes)."""
+    import base64, hashlib, time
+    raw = f"{path}:{operation}::{envd_access_token}"
+    digest = hashlib.sha256(raw.encode('utf-8')).digest()
+    encoded = base64.b64encode(digest).rstrip(b'=').decode('ascii')
+    signature = f"v1_{encoded}"
+    encoded_path = urllib.parse.quote(path)
+    return f"{_envd_url(sandbox_id)}/files?path={encoded_path}&signature={urllib.parse.quote(signature)}"
 
 
-def get_workspace_files(sandbox_id: str, directory: str = '/tmp/manus_assets') -> list:
+def _get_envd_token(agent_id: str) -> str:
+    """Get the envd_access_token for an agent, if stored."""
+    info = AGENT_SANDBOXES.get(agent_id, {})
+    return info.get('envd_access_token', '')
+
+
+def get_workspace_files(sandbox_id: str, directory: str = '/tmp/manus_assets', envd_access_token: str = '') -> list:
     """List files in an agent's E2B sandbox workspace via direct envd HTTP API."""
     try:
         import urllib.request
-        url = f"{_envd_url(sandbox_id)}/files?path={urllib.parse.quote(directory)}"
-        req = urllib.request.Request(url, headers=_envd_headers())
+        if envd_access_token:
+            url = _envd_signed_url(sandbox_id, directory, envd_access_token)
+        else:
+            url = f"{_envd_url(sandbox_id)}/files?path={urllib.parse.quote(directory)}"
+        req = urllib.request.Request(url)
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read())
         out = []
@@ -344,25 +359,31 @@ def get_workspace_files(sandbox_id: str, directory: str = '/tmp/manus_assets') -
         return []
 
 
-def get_workspace_file_content(sandbox_id: str, path: str) -> str:
+def get_workspace_file_content(sandbox_id: str, path: str, envd_access_token: str = '') -> str:
     """Read a file from an agent's E2B sandbox via direct envd HTTP API."""
     try:
         import urllib.request
-        url = f"{_envd_url(sandbox_id)}/files?path={urllib.parse.quote(path)}"
-        req = urllib.request.Request(url, headers=_envd_headers())
+        if envd_access_token:
+            url = _envd_signed_url(sandbox_id, path, envd_access_token)
+        else:
+            url = f"{_envd_url(sandbox_id)}/files?path={urllib.parse.quote(path)}"
+        req = urllib.request.Request(url)
         with urllib.request.urlopen(req, timeout=10) as resp:
             return resp.read().decode('utf-8', errors='replace')
     except Exception as e:
         return f"Error: {e}"
 
 
-def get_workspace_terminal(sandbox_id: str, agent_id: str, lines: int = 50) -> str:
+def get_workspace_terminal(sandbox_id: str, agent_id: str, lines: int = 50, envd_access_token: str = '') -> str:
     """Get the last N lines of an agent's terminal log via direct envd HTTP API."""
     try:
         import urllib.request
         log_path = f"/tmp/agent_{agent_id}.log"
-        url = f"{_envd_url(sandbox_id)}/files?path={urllib.parse.quote(log_path)}"
-        req = urllib.request.Request(url, headers=_envd_headers())
+        if envd_access_token:
+            url = _envd_signed_url(sandbox_id, log_path, envd_access_token)
+        else:
+            url = f"{_envd_url(sandbox_id)}/files?path={urllib.parse.quote(log_path)}"
+        req = urllib.request.Request(url)
         with urllib.request.urlopen(req, timeout=10) as resp:
             content = resp.read().decode('utf-8', errors='replace')
         log_lines = content.split('\n')
@@ -371,15 +392,19 @@ def get_workspace_terminal(sandbox_id: str, agent_id: str, lines: int = 50) -> s
         return f"Error: {e}"
 
 
-def get_workspace_screenshot(sandbox_id: str) -> dict:
+def get_workspace_screenshot(sandbox_id: str, envd_access_token: str = '') -> dict:
     """Get the most recently modified file in the agent's workspace via direct envd HTTP API.
     Since agent sandboxes are headless (no X11/scrot), we return the latest file content
     as a 'live view' of what the agent is working on."""
     try:
         import urllib.request
+        directory = '/tmp/manus_assets'
         # List files
-        url = f"{_envd_url(sandbox_id)}/files?path={urllib.parse.quote('/tmp/manus_assets')}"
-        req = urllib.request.Request(url, headers=_envd_headers())
+        if envd_access_token:
+            url = _envd_signed_url(sandbox_id, directory, envd_access_token)
+        else:
+            url = f"{_envd_url(sandbox_id)}/files?path={urllib.parse.quote(directory)}"
+        req = urllib.request.Request(url)
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read())
         file_list = [f for f in (data if isinstance(data, list) else []) if f.get('type') == 'file']
@@ -388,8 +413,11 @@ def get_workspace_screenshot(sandbox_id: str) -> dict:
         # Sort by lastModified, get most recent
         latest = sorted(file_list, key=lambda f: f.get('lastModified', ''), reverse=True)[0]
         # Read its content
-        content_url = f"{_envd_url(sandbox_id)}/files?path={urllib.parse.quote(latest['path'])}"
-        req2 = urllib.request.Request(content_url, headers=_envd_headers())
+        if envd_access_token:
+            content_url = _envd_signed_url(sandbox_id, latest['path'], envd_access_token)
+        else:
+            content_url = f"{_envd_url(sandbox_id)}/files?path={urllib.parse.quote(latest['path'])}"
+        req2 = urllib.request.Request(content_url)
         with urllib.request.urlopen(req2, timeout=10) as resp2:
             content = resp2.read().decode('utf-8', errors='replace')
         return {
@@ -469,7 +497,8 @@ def health_check(path, request_headers):
         if agent_id not in AGENT_SANDBOXES:
             return http.HTTPStatus.NOT_FOUND, cors, json.dumps({"error": f"Unknown agent: {agent_id}"}).encode()
         sandbox_id = AGENT_SANDBOXES[agent_id]['sandbox_id']
-        files = get_workspace_files(sandbox_id, directory)
+        envd_token = _get_envd_token(agent_id)
+        files = get_workspace_files(sandbox_id, directory, envd_token)
         body = json.dumps({
             "agent_id": agent_id,
             "display_name": AGENT_SANDBOXES[agent_id]['display_name'],
@@ -491,7 +520,8 @@ def health_check(path, request_headers):
         if not file_path:
             return http.HTTPStatus.BAD_REQUEST, cors, json.dumps({"error": "Missing path parameter"}).encode()
         sandbox_id = AGENT_SANDBOXES[agent_id]['sandbox_id']
-        content = get_workspace_file_content(sandbox_id, file_path)
+        envd_token = _get_envd_token(agent_id)
+        content = get_workspace_file_content(sandbox_id, file_path, envd_token)
         body = json.dumps({
             "agent_id": agent_id,
             "path": file_path,
@@ -510,7 +540,8 @@ def health_check(path, request_headers):
         if agent_id not in AGENT_SANDBOXES:
             return http.HTTPStatus.NOT_FOUND, cors, json.dumps({"error": f"Unknown agent: {agent_id}"}).encode()
         sandbox_id = AGENT_SANDBOXES[agent_id]['sandbox_id']
-        terminal_output = get_workspace_terminal(sandbox_id, agent_id, lines)
+        envd_token = _get_envd_token(agent_id)
+        terminal_output = get_workspace_terminal(sandbox_id, agent_id, lines, envd_token)
         body = json.dumps({
             "agent_id": agent_id,
             "display_name": AGENT_SANDBOXES[agent_id]['display_name'],
@@ -527,7 +558,8 @@ def health_check(path, request_headers):
         if agent_id not in AGENT_SANDBOXES:
             return http.HTTPStatus.NOT_FOUND, cors, json.dumps({"error": f"Unknown agent: {agent_id}"}).encode()
         sandbox_id = AGENT_SANDBOXES[agent_id]['sandbox_id']
-        result = get_workspace_screenshot(sandbox_id)
+        envd_token = _get_envd_token(agent_id)
+        result = get_workspace_screenshot(sandbox_id, envd_token)
         body = json.dumps({
             "agent_id": agent_id,
             "display_name": AGENT_SANDBOXES[agent_id]['display_name'],
@@ -548,8 +580,13 @@ def health_check(path, request_headers):
         display_name = params.get('display_name', [agent_id])[0]
         if not agent_id or not sandbox_id:
             return http.HTTPStatus.BAD_REQUEST, cors, json.dumps({"error": "Missing agent_id or sandbox_id"}).encode()
-        AGENT_SANDBOXES[agent_id] = {'sandbox_id': sandbox_id, 'display_name': display_name}
-        logger.info(f"📦 Workspace registered: {agent_id} -> {sandbox_id}")
+        envd_access_token = params.get('envd_access_token', [''])[0]
+        AGENT_SANDBOXES[agent_id] = {
+            'sandbox_id': sandbox_id,
+            'display_name': display_name,
+            'envd_access_token': envd_access_token
+        }
+        logger.info(f"📦 Workspace registered: {agent_id} -> {sandbox_id} (token={'yes' if envd_access_token else 'no'})")
         body = json.dumps({"ok": True, "agent_id": agent_id, "sandbox_id": sandbox_id}).encode()
         return http.HTTPStatus.OK, cors, body
 
