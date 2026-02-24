@@ -433,6 +433,102 @@ def get_workspace_screenshot(sandbox_id: str, envd_access_token: str = '') -> di
         return {"type": "error", "message": str(e)}
 
 
+def get_workspace_activity(sandbox_id: str, agent_id: str, envd_access_token: str = '') -> dict:
+    """Parse the agent log to determine current activity mode and return relevant content.
+    Modes: 'browse' (browser screenshot), 'edit' (file content), 'run' (terminal), 'think' (LLM), 'idle'"""
+    import base64 as _b64, re as _re
+    try:
+        # Read last 60 lines of log
+        log_path = f'/tmp/{agent_id}.log'
+        raw_log = _envd_read_file(sandbox_id, log_path, envd_access_token).decode('utf-8', errors='replace')
+        lines = [l for l in raw_log.split('\n') if l.strip()][-60:]
+        last_lines = '\n'.join(lines)
+
+        # Extract last few step lines for the step log
+        step_lines = []
+        for line in lines[-20:]:
+            if 'Ejecutando:' in line or '[SENT' in line or 'LLM [' in line or '[RECONECT]' in line:
+                # Clean timestamp
+                clean = _re.sub(r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+ ', '', line).strip()
+                step_lines.append(clean)
+
+        # Determine current mode from most recent action
+        mode = 'idle'
+        detail = ''
+        current_url = ''
+        current_file = ''
+
+        # Scan lines in reverse to find the most recent action
+        for line in reversed(lines):
+            if 'Ejecutando: browse' in line or 'Ejecutando: search' in line:
+                mode = 'browse'
+                # Extract URL if present
+                url_match = _re.search(r'https?://[^\s]+', line)
+                if url_match:
+                    current_url = url_match.group(0)
+                break
+            elif 'Ejecutando: write_file' in line or 'Ejecutando: read_file' in line or 'Ejecutando: append_file' in line:
+                mode = 'edit'
+                # Extract file path
+                path_match = _re.search(r'[/\w]+\.[a-z]+', line)
+                if path_match:
+                    current_file = path_match.group(0)
+                break
+            elif 'Ejecutando: python' in line or 'Ejecutando: bash' in line or 'Ejecutando: shell' in line:
+                mode = 'run'
+                break
+            elif 'LLM [REACT]' in line or 'LLM [CHAT]' in line:
+                mode = 'think'
+                break
+            elif '[SENT' in line:
+                mode = 'think'
+                break
+
+        result = {
+            'mode': mode,
+            'step_log': step_lines[-10:],
+            'current_url': current_url,
+            'current_file': current_file,
+        }
+
+        # If browse mode, try to get browser screenshot
+        if mode == 'browse':
+            try:
+                img_bytes = _envd_read_file(sandbox_id, '/tmp/manus_assets/browser_view.png', envd_access_token)
+                result['screenshot'] = _b64.b64encode(img_bytes).decode('ascii')
+            except Exception:
+                pass
+
+        # If edit mode, try to get the file content
+        if mode == 'edit' and current_file:
+            try:
+                content = _envd_read_file(sandbox_id, current_file, envd_access_token).decode('utf-8', errors='replace')
+                result['file_content'] = content[:8000]
+                result['file_name'] = current_file.split('/')[-1]
+            except Exception:
+                pass
+
+        # Always try to get the most recently modified file as fallback for edit mode
+        if mode in ('edit', 'idle') and not result.get('file_content'):
+            try:
+                file_list = _envd_list_dir(sandbox_id, '/tmp/manus_assets', envd_access_token)
+                file_list = [f for f in file_list if f.get('type') == 'FILE' and not f['name'].endswith('.png')]
+                if file_list:
+                    latest = sorted(file_list, key=lambda f: f.get('modified', ''), reverse=True)[0]
+                    content = _envd_read_file(sandbox_id, latest['path'], envd_access_token).decode('utf-8', errors='replace')
+                    result['file_content'] = content[:8000]
+                    result['file_name'] = latest['name']
+                    result['file_path'] = latest['path']
+                    if mode == 'idle':
+                        result['mode'] = 'edit'
+            except Exception:
+                pass
+
+        return result
+    except Exception as e:
+        return {'mode': 'idle', 'step_log': [], 'error': str(e)}
+
+
 def health_check(path, request_headers):
     """HTTP endpoints: health check + admin room management + workspace"""
     if path == "/healthz":
@@ -489,7 +585,7 @@ def health_check(path, request_headers):
 
     # Workspace: list files for an agent
     # GET /workspace/{agent_id}?dir=/tmp/manus_assets
-    if path.startswith("/workspace/") and "/file" not in path and "/terminal" not in path and "/register" not in path and "/screenshot" not in path:
+    if path.startswith("/workspace/") and "/file" not in path and "/terminal" not in path and "/register" not in path and "/screenshot" not in path and "/activity" not in path:
         cors = {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"}
         parts = path.split("?")
         agent_id = parts[0].replace("/workspace/", "").strip("/")
@@ -567,6 +663,23 @@ def health_check(path, request_headers):
             **result
         }).encode()
         return http.HTTPStatus.OK, cors, body
+    # Workspace: activity — current mode + content (auto-switching view)
+    # GET /workspace/{agent_id}/activity
+    if path.startswith("/workspace/") and "/activity" in path:
+        cors = {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"}
+        agent_id = path.replace("/workspace/", "").replace("/activity", "").strip("/").split("?")[0]
+        if agent_id not in AGENT_SANDBOXES:
+            return http.HTTPStatus.NOT_FOUND, cors, json.dumps({"error": f"Unknown agent: {agent_id}"}).encode()
+        sandbox_id = AGENT_SANDBOXES[agent_id]['sandbox_id']
+        envd_token = _get_envd_token(agent_id)
+        result = get_workspace_activity(sandbox_id, agent_id, envd_token)
+        body = json.dumps({
+            "agent_id": agent_id,
+            "display_name": AGENT_SANDBOXES[agent_id]['display_name'],
+            **result
+        }).encode()
+        return http.HTTPStatus.OK, cors, body
+
     # Workspace: register/update sandbox ID for an agent
     # GET /workspace/register?agent_id=manus_agent_042&sandbox_id=abc123&secret=KEY
     if path.startswith("/workspace/register"):
