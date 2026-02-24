@@ -460,12 +460,19 @@ def get_workspace_activity(sandbox_id: str, agent_id: str, envd_access_token: st
 
         # Scan lines in reverse to find the most recent action
         for line in reversed(lines):
-            if 'Ejecutando: browse' in line or 'Ejecutando: search' in line:
+            if 'Ejecutando: browse' in line:
                 mode = 'browse'
                 # Extract URL if present
                 url_match = _re.search(r'https?://[^\s]+', line)
                 if url_match:
                     current_url = url_match.group(0)
+                break
+            elif 'Ejecutando: search' in line:
+                mode = 'search'
+                # Extract search query from the line
+                q_match = _re.search(r'search[:\s]+["\']?([^"\'\n]+)', line, _re.IGNORECASE)
+                if q_match:
+                    detail = q_match.group(1).strip()
                 break
             elif 'Ejecutando: write_file' in line or 'Ejecutando: read_file' in line or 'Ejecutando: append_file' in line:
                 mode = 'edit'
@@ -498,6 +505,28 @@ def get_workspace_activity(sandbox_id: str, agent_id: str, envd_access_token: st
                 result['screenshot'] = _b64.b64encode(img_bytes).decode('ascii')
             except Exception:
                 pass
+        # If search mode, extract recent search queries and results from log
+        if mode == 'search':
+            search_entries = []
+            current_query = None
+            for line in lines:
+                # Detect search execution line
+                if 'Ejecutando: search' in line:
+                    q_match = _re.search(r'search[:\s]+["\']?([^"\'\n]{3,80})', line, _re.IGNORECASE)
+                    current_query = q_match.group(1).strip() if q_match else 'Searching...'
+                # Detect Follow-up search line (contains the query)
+                elif 'Follow-up search:' in line:
+                    q_match = _re.search(r'Follow-up search:\s*[•\-]?\s*(.+)', line)
+                    if q_match:
+                        current_query = q_match.group(1).strip()[:80]
+                        search_entries.append({'query': current_query, 'result': ''})
+                # Detect search result lines (SENT messages after a search)
+                elif '[SENT' in line and current_query and search_entries:
+                    result_match = _re.search(r'\[SENT[^\]]+\]\s*(.+)', line)
+                    if result_match and not search_entries[-1]['result']:
+                        search_entries[-1]['result'] = result_match.group(1).strip()[:200]
+            result['search_entries'] = search_entries[-5:] if search_entries else []
+            result['search_query'] = detail or (search_entries[-1]['query'] if search_entries else 'Searching...')
 
         # If edit mode, try to get the file content
         if mode == 'edit' and current_file:
