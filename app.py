@@ -316,15 +316,39 @@ def _envd_url(sandbox_id: str) -> str:
     return f"https://49983-{sandbox_id}.e2b.app"
 
 
-def _envd_signed_url(sandbox_id: str, path: str, envd_access_token: str, operation: str = 'read') -> str:
-    """Generate a signed URL for the envd HTTP API (required for authenticated sandboxes)."""
-    import base64, hashlib, time
-    raw = f"{path}:{operation}::{envd_access_token}"
-    digest = hashlib.sha256(raw.encode('utf-8')).digest()
-    encoded = base64.b64encode(digest).rstrip(b'=').decode('ascii')
-    signature = f"v1_{encoded}"
-    encoded_path = urllib.parse.quote(path)
-    return f"{_envd_url(sandbox_id)}/files?path={encoded_path}&signature={urllib.parse.quote(signature)}"
+def _envd_read_file(sandbox_id: str, path: str, envd_access_token: str = '') -> bytes:
+    """Read a file from the envd HTTP API using X-Access-Token header."""
+    import urllib.request
+    url = f"{_envd_url(sandbox_id)}/files?path={urllib.parse.quote(path)}"
+    headers = {}
+    if envd_access_token:
+        headers['X-Access-Token'] = envd_access_token
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return resp.read()
+
+
+def _envd_list_dir(sandbox_id: str, directory: str, envd_access_token: str = '') -> list:
+    """List files in a directory using E2B SDK (gRPC-based, works with access token)."""
+    try:
+        import os as _os
+        _os.environ['E2B_API_KEY'] = E2B_API_KEY
+        from e2b import Sandbox
+        sbx = Sandbox.connect(sandbox_id)
+        items = sbx.files.list(directory)
+        result = []
+        for f in items:
+            result.append({
+                'name': f.name,
+                'path': f.path,
+                'size': getattr(f, 'size', 0) or 0,
+                'type': 'FILE' if str(f.type).endswith('FILE') else 'DIR',
+                'modified': f.modified_time.isoformat() if getattr(f, 'modified_time', None) else ''
+            })
+        return result
+    except Exception as e:
+        logger.error(f"envd list_dir error: {e}")
+        return []
 
 
 def _get_envd_token(agent_id: str) -> str:
@@ -334,42 +358,14 @@ def _get_envd_token(agent_id: str) -> str:
 
 
 def get_workspace_files(sandbox_id: str, directory: str = '/tmp/manus_assets', envd_access_token: str = '') -> list:
-    """List files in an agent's E2B sandbox workspace via direct envd HTTP API."""
-    try:
-        import urllib.request
-        if envd_access_token:
-            url = _envd_signed_url(sandbox_id, directory, envd_access_token)
-        else:
-            url = f"{_envd_url(sandbox_id)}/files?path={urllib.parse.quote(directory)}"
-        req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-        out = []
-        for f in (data if isinstance(data, list) else []):
-            out.append({
-                "name": f.get("name", ""),
-                "path": f.get("path", ""),
-                "size": f.get("size", 0),
-                "type": "FILE" if f.get("type") == "file" else "DIR",
-                "modified": f.get("lastModified", "")
-            })
-        return out
-    except Exception as e:
-        logger.error(f"workspace files error: {e}")
-        return []
+    """List files in an agent's E2B sandbox workspace via SDK gRPC (handles auth automatically)."""
+    return _envd_list_dir(sandbox_id, directory, envd_access_token)
 
 
 def get_workspace_file_content(sandbox_id: str, path: str, envd_access_token: str = '') -> str:
     """Read a file from an agent's E2B sandbox via direct envd HTTP API."""
     try:
-        import urllib.request
-        if envd_access_token:
-            url = _envd_signed_url(sandbox_id, path, envd_access_token)
-        else:
-            url = f"{_envd_url(sandbox_id)}/files?path={urllib.parse.quote(path)}"
-        req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return resp.read().decode('utf-8', errors='replace')
+        return _envd_read_file(sandbox_id, path, envd_access_token).decode('utf-8', errors='replace')
     except Exception as e:
         return f"Error: {e}"
 
@@ -377,15 +373,8 @@ def get_workspace_file_content(sandbox_id: str, path: str, envd_access_token: st
 def get_workspace_terminal(sandbox_id: str, agent_id: str, lines: int = 50, envd_access_token: str = '') -> str:
     """Get the last N lines of an agent's terminal log via direct envd HTTP API."""
     try:
-        import urllib.request
         log_path = f"/tmp/agent_{agent_id}.log"
-        if envd_access_token:
-            url = _envd_signed_url(sandbox_id, log_path, envd_access_token)
-        else:
-            url = f"{_envd_url(sandbox_id)}/files?path={urllib.parse.quote(log_path)}"
-        req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            content = resp.read().decode('utf-8', errors='replace')
+        content = _envd_read_file(sandbox_id, log_path, envd_access_token).decode('utf-8', errors='replace')
         log_lines = content.split('\n')
         return '\n'.join(log_lines[-lines:])
     except Exception as e:
@@ -393,39 +382,24 @@ def get_workspace_terminal(sandbox_id: str, agent_id: str, lines: int = 50, envd
 
 
 def get_workspace_screenshot(sandbox_id: str, envd_access_token: str = '') -> dict:
-    """Get the most recently modified file in the agent's workspace via direct envd HTTP API.
-    Since agent sandboxes are headless (no X11/scrot), we return the latest file content
-    as a 'live view' of what the agent is working on."""
+    """Get the most recently modified file in the agent's workspace.
+    Uses SDK gRPC for listing and HTTP API for reading file content."""
     try:
-        import urllib.request
         directory = '/tmp/manus_assets'
-        # List files
-        if envd_access_token:
-            url = _envd_signed_url(sandbox_id, directory, envd_access_token)
-        else:
-            url = f"{_envd_url(sandbox_id)}/files?path={urllib.parse.quote(directory)}"
-        req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-        file_list = [f for f in (data if isinstance(data, list) else []) if f.get('type') == 'file']
+        file_list = _envd_list_dir(sandbox_id, directory, envd_access_token)
+        file_list = [f for f in file_list if f.get('type') == 'FILE']
         if not file_list:
             return {"type": "empty", "message": "No files in workspace"}
-        # Sort by lastModified, get most recent
-        latest = sorted(file_list, key=lambda f: f.get('lastModified', ''), reverse=True)[0]
-        # Read its content
-        if envd_access_token:
-            content_url = _envd_signed_url(sandbox_id, latest['path'], envd_access_token)
-        else:
-            content_url = f"{_envd_url(sandbox_id)}/files?path={urllib.parse.quote(latest['path'])}"
-        req2 = urllib.request.Request(content_url)
-        with urllib.request.urlopen(req2, timeout=10) as resp2:
-            content = resp2.read().decode('utf-8', errors='replace')
+        # Sort by modified time, get most recent
+        latest = sorted(file_list, key=lambda f: f.get('modified', ''), reverse=True)[0]
+        # Read its content via HTTP API
+        content = _envd_read_file(sandbox_id, latest['path'], envd_access_token).decode('utf-8', errors='replace')
         return {
             "type": "file",
             "path": latest['path'],
             "name": latest['name'],
             "size": latest.get('size', 0),
-            "modified": latest.get('lastModified', ''),
+            "modified": latest.get('modified', ''),
             "content": content[:8000]
         }
     except Exception as e:
