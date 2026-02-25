@@ -339,15 +339,34 @@ def _envd_url(sandbox_id: str) -> str:
 
 
 def _envd_read_file(sandbox_id: str, path: str, envd_access_token: str = '') -> bytes:
-    """Read a file from the envd HTTP API using X-Access-Token header."""
+    """Read a file from the envd HTTP API, with E2B SDK fallback."""
     import urllib.request
-    url = f"{_envd_url(sandbox_id)}/files?path={urllib.parse.quote(path)}"
-    headers = {}
+    # Try envd first if we have a token
     if envd_access_token:
-        headers['X-Access-Token'] = envd_access_token
-    req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        return resp.read()
+        try:
+            url = f"{_envd_url(sandbox_id)}/files?path={urllib.parse.quote(path)}"
+            headers = {'X-Access-Token': envd_access_token}
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                return resp.read()
+        except Exception:
+            pass  # Fall through to SDK
+    # Fallback: use E2B SDK directly (always works with API key)
+    if E2B_API_KEY:
+        try:
+            import subprocess, sys
+            result = subprocess.run(
+                [sys.executable, '-c',
+                 f'import os; os.environ["E2B_API_KEY"]="{E2B_API_KEY}"; '
+                 f'from e2b import Sandbox; sbx=Sandbox.connect("{sandbox_id}"); '
+                 f'import sys; sys.stdout.buffer.write(sbx.files.read("{path}").encode("utf-8", errors="replace"))'],
+                capture_output=True, timeout=15
+            )
+            if result.returncode == 0 and result.stdout:
+                return result.stdout
+        except Exception as e:
+            logger.warning(f"E2B SDK read fallback failed: {e}")
+    raise FileNotFoundError(f"Cannot read {path} from sandbox {sandbox_id}")
 
 
 def _envd_list_dir(sandbox_id: str, directory: str, envd_access_token: str = '') -> list:
