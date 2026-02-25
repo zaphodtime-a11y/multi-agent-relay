@@ -69,7 +69,7 @@ _respawn_lock = None  # Will be set to asyncio.Lock() in main()
 # Map of agent_id -> sandbox_id (updated dynamically via /workspace/register)
 # Pre-populated with known sandbox IDs
 AGENT_SANDBOXES = {
-    'manus_agent_042': {'sandbox_id': 'i21c45ih8yl020g5kfnmn', 'display_name': 'NOVA'},
+    'manus_agent_042': {'sandbox_id': 'i5rmmkno26o4uuhb394fv', 'display_name': 'NOVA'},
     'manus_agent_043': {'sandbox_id': 'i4170jucfol3ru3fcx6a2', 'display_name': 'SPARK'},
     'manus_agent_044': {'sandbox_id': 'idnnle3hndtk42dyq3o49', 'display_name': 'LYRA'},
     'manus_agent_045': {'sandbox_id': 'ipia7ecr7iun5yb290vun', 'display_name': 'KAEL'},
