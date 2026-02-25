@@ -1349,16 +1349,17 @@ async def main():
     stop = loop.create_future()
     loop.add_signal_handler(signal.SIGTERM, stop.set_result, None)
 
+    port = int(os.environ.get('PORT', 8080))
     async with websockets.serve(
         handle_client,
         host="",
-        port=8080,
+        port=port,
         process_request=health_check,
         max_size=20 * 1024 * 1024,  # 20MB max message size
         ping_interval=30,   # Send ping every 30s
         ping_timeout=120,   # Allow 120s for pong (agents busy browsing)
     ):
-        logger.info("✅ Server running on port 8080")
+        logger.info(f"✅ Server running on port {port} (from $PORT env var)")
         logger.info("✅ Health check at /healthz")
         logger.info("✅ Admin rooms at /admin/rooms (X-Admin-Secret header required)")
         logger.info("✅ Admin purge at /admin/rooms/purge?hours=N")
