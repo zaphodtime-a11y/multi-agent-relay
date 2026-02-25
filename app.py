@@ -50,6 +50,22 @@ ADMIN_SECRET = "relay-admin-2026"
 # E2B API key for workspace access
 E2B_API_KEY = os.environ.get('E2B_API_KEY', '')
 
+# Auto-respawn config — env vars passed to agents on relaunch
+AGENT_OPENAI_API_KEY   = os.environ.get('OPENAI_API_KEY', '')
+AGENT_OPENAI_BASE_URL  = os.environ.get('OPENAI_BASE_URL', 'https://api.manus.im/api/llm-proxy/v1')
+AGENT_MEMORY_URL       = os.environ.get('MEMORY_SERVER_URL', 'https://memory-server-production-647a.up.railway.app')
+AGENT_BROWSER_URL      = os.environ.get('BROWSER_SERVICE_URL', 'https://terrachat-browser-service-production.up.railway.app')
+AGENT_BROWSER_KEY      = os.environ.get('BROWSER_SERVICE_KEY', 'terrachat-browser-2026')
+AGENT_TAVILY_KEY       = os.environ.get('TAVILY_API_KEY', '')
+AGENT_RELAY_URL        = os.environ.get('RELAY_URL', 'wss://web-production-76b83.up.railway.app/ws')
+
+# Set of agent IDs that should be auto-respawned when they disconnect
+AUTO_RESPAWN_AGENTS = {'manus_agent_200', 'manus_agent_201', 'manus_agent_202', 'manus_agent_203', 'manus_agent_204'}
+
+# Track last respawn time to avoid respawn storms (min 30s between respawns per agent)
+_last_respawn: dict = {}
+_respawn_lock = None  # Will be set to asyncio.Lock() in main()
+
 # Map of agent_id -> sandbox_id (updated dynamically via /workspace/register)
 # Pre-populated with known sandbox IDs
 AGENT_SANDBOXES = {
@@ -1118,6 +1134,126 @@ async def handle_client(websocket):
             }
             await broadcast_message(agent_left_msg, client_id)
             logger.info(f"📢 Broadcasted AGENT_LEFT for {client_id}")
+            # Auto-respawn Mettis agents after disconnect
+            if client_id in AUTO_RESPAWN_AGENTS:
+                asyncio.create_task(_respawn_agent(client_id))
+
+
+async def _respawn_agent(agent_id: str):
+    """Relaunch an E2B sandbox agent after it disconnects. Waits 10s first."""
+    global _respawn_lock
+    import time
+    await asyncio.sleep(10)  # Brief pause before respawn
+
+    # Throttle: don't respawn more than once per 30s per agent
+    now = time.time()
+    last = _last_respawn.get(agent_id, 0)
+    if now - last < 30:
+        logger.info(f"⏭️  Skipping respawn for {agent_id} (too soon, {int(now-last)}s ago)")
+        return
+
+    # If agent reconnected on its own, skip
+    if agent_id in clients:
+        logger.info(f"✅ {agent_id} already reconnected — skipping respawn")
+        return
+
+    info = AGENT_SANDBOXES.get(agent_id)
+    if not info:
+        logger.warning(f"⚠️  No sandbox info for {agent_id} — cannot respawn")
+        return
+
+    sandbox_id = info.get('sandbox_id', '')
+    display_name = info.get('display_name', agent_id)
+    if not sandbox_id:
+        logger.warning(f"⚠️  No sandbox_id for {agent_id} — cannot respawn")
+        return
+
+    if not E2B_API_KEY:
+        logger.warning(f"⚠️  E2B_API_KEY not set — cannot respawn {agent_id}")
+        return
+
+    logger.info(f"🔄 Auto-respawning {display_name} ({agent_id}) in sandbox {sandbox_id}...")
+    _last_respawn[agent_id] = now
+
+    try:
+        import subprocess, sys, tempfile, os
+
+        # Read the latest agent code from this relay's filesystem
+        agent_code_path = '/app/manus_agent_v3.py'
+        if not os.path.exists(agent_code_path):
+            agent_code_path = os.path.join(os.path.dirname(__file__), 'manus_agent_v3.py')
+        if not os.path.exists(agent_code_path):
+            logger.warning(f"⚠️  Agent code not found at {agent_code_path}")
+            return
+
+        with open(agent_code_path, 'r') as f:
+            agent_code = f.read()
+
+        # Get the soul prompt for this agent
+        soul = AGENT_SOULS.get(agent_id, '')
+
+        # Build the start script
+        soul_escaped = soul.replace('"', '\\"').replace('`', '\\`').replace('$', '\\$')
+        start_sh = f"""#!/bin/bash
+export OPENAI_API_KEY="{AGENT_OPENAI_API_KEY}"
+export OPENAI_BASE_URL="{AGENT_OPENAI_BASE_URL}"
+export E2B_API_KEY="{E2B_API_KEY}"
+export MEMORY_SERVER_URL="{AGENT_MEMORY_URL}"
+export BROWSER_SERVICE_URL="{AGENT_BROWSER_URL}"
+export BROWSER_SERVICE_API_KEY="{AGENT_BROWSER_KEY}"
+export TAVILY_API_KEY="{AGENT_TAVILY_KEY}"
+export AGENT_DISPLAY_NAME="{display_name}"
+export RELAY_URL="{AGENT_RELAY_URL}"
+export PYTHONUNBUFFERED=1
+export AGENT_SOUL="{soul_escaped}"
+pip install tavily-python -q 2>/dev/null || true
+cd /home/user/agent
+pkill -f "manus_agent_v3.py {agent_id}" 2>/dev/null; sleep 1
+nohup python3 manus_agent_v3.py {agent_id} > /tmp/agent_{agent_id}.log 2>&1 &
+echo "PID: $!"
+"""
+        # Run the respawn via subprocess (E2B SDK)
+        respawn_script = f"""
+import os
+os.environ['E2B_API_KEY'] = '{E2B_API_KEY}'
+from e2b import Sandbox
+sbx = Sandbox.connect('{sandbox_id}')
+agent_code = open('/app/manus_agent_v3.py').read()
+sbx.files.write('/home/user/agent/manus_agent_v3.py', agent_code)
+sbx.files.write('/home/user/start_agent.sh', {repr(start_sh)})
+sbx.commands.run('chmod +x /home/user/start_agent.sh', timeout=5)
+r = sbx.commands.run('bash /home/user/start_agent.sh', timeout=15)
+print(r.stdout.strip())
+"""
+        result = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: subprocess.run(
+                [sys.executable, '-c', respawn_script],
+                capture_output=True, text=True, timeout=60
+            )
+        )
+        if result.returncode == 0:
+            logger.info(f"✅ Respawned {display_name}: {result.stdout.strip()[:100]}")
+        else:
+            logger.error(f"❌ Respawn failed for {display_name}: {result.stderr.strip()[:200]}")
+    except Exception as e:
+        logger.error(f"❌ Respawn error for {display_name}: {e}")
+
+
+# Soul prompts for each Mettis agent (used during respawn)
+METTIS_MISSION = """MISIÓN ACTUAL — METTIS AI SALES TEAM:
+Sois un equipo de agentes especializados contratados para crear el plan de ventas y pipeline comercial completo para Mettis AI.
+Mettis AI es una empresa de inteligencia artificial que desarrolla soluciones de agentes autónomos para empresas.
+SALA DE TRABAJO: #mettis-ai (cambiaros a esa sala inmediatamente al conectaros usando ##MANUS_ROOM: mettis-ai##)
+Trabajad de forma autónoma y colaborativa. Investigad, escribid documentos, compartid hallazgos."""
+
+AGENT_SOULS = {
+    'manus_agent_200': f"""Eres ATLAS, Sales Director del equipo Mettis AI. Lideras la estrategia comercial, coordinas al equipo y aseguras que todos los entregables se completen. Personalidad: directivo, orientado a resultados, pragmático. {METTIS_MISSION}""",
+    'manus_agent_201': f"""Eres VEGA, Sales Strategist del equipo Mettis AI. Defines el ICP, los segmentos objetivo y la estrategia de go-to-market. Personalidad: analítica, estratégica, orientada a datos. {METTIS_MISSION}""",
+    'manus_agent_202': f"""Eres ORION, Market Intelligence del equipo Mettis AI. Investigas el mercado, la competencia y las tendencias. Personalidad: curioso, metódico, orientado a la investigación. {METTIS_MISSION}""",
+    'manus_agent_203': f"""Eres NEXUS, Revenue Operations del equipo Mettis AI. Diseñas el pipeline de ventas, los procesos y las métricas. Personalidad: sistemático, orientado a procesos, analítico. {METTIS_MISSION}""",
+    'manus_agent_204': f"""Eres LYRIC, Copywriter & Storyteller del equipo Mettis AI. Creas los mensajes de ventas, email sequences y el pitch deck. Personalidad: creativa, persuasiva, orientada a la narrativa. {METTIS_MISSION}""",
+}
 
 
 def _fetch_envd_tokens_background():
@@ -1156,13 +1292,17 @@ def _fetch_envd_tokens_background():
     logger.info("🔑 Token auto-fetch complete")
 
 async def main():
+    global _respawn_lock
+    _respawn_lock = asyncio.Lock()
     logger.info("=" * 60)
-    logger.info("🚀 Multi-Agent Relay Server v0.9 (Production)")
+    logger.info("🚀 Multi-Agent Relay Server v1.0 (Auto-Respawn)")
     logger.info("=" * 60)
     init_database()
     # Start background token fetch (non-blocking)
     import threading
     threading.Thread(target=_fetch_envd_tokens_background, daemon=True).start()
+    # Log auto-respawn config
+    logger.info(f"🔄 Auto-respawn enabled for: {sorted(AUTO_RESPAWN_AGENTS)}")
 
     loop = asyncio.get_running_loop()
     stop = loop.create_future()
