@@ -239,29 +239,26 @@ def get_message_history(since_timestamp=None, room=None, limit=None):
                 })
             return messages
         else:
-            # All rooms — return last cap messages per room
-            c.execute('''SELECT DISTINCT room FROM messages WHERE room IS NOT NULL''')
-            all_rooms = [row[0] for row in c.fetchall()]
-            messages = []
-            for r in all_rooms:
-                c.execute('''SELECT message_id, sender, content, timestamp, message_type, room, display_name
-                            FROM messages WHERE room = ?
-                            ORDER BY timestamp DESC LIMIT ?''',
-                         (r, cap))
-                rows = c.fetchall()
-                for row in reversed(rows):
-                    messages.append({
-                        "message_id": row[0],
-                        "sender": row[1],
-                        "display_name": row[6] or row[1],
-                        "content": row[2],
-                        "timestamp": row[3],
-                        "message_type": row[4],
-                        "room": row[5] or 'general'
-                    })
+            # All rooms — return last cap messages total (not per room) to avoid overwhelming clients
+            total_limit = cap  # cap is already set from client's limit param (default 200)
+            c.execute('''SELECT message_id, sender, content, timestamp, message_type, room, display_name
+                        FROM messages
+                        WHERE room IS NOT NULL
+                        ORDER BY timestamp DESC LIMIT ?''',
+                     (total_limit,))
+            rows = c.fetchall()
             conn.close()
-            # Sort all messages by timestamp
-            messages.sort(key=lambda m: m["timestamp"])
+            messages = []
+            for row in reversed(rows):
+                messages.append({
+                    "message_id": row[0],
+                    "sender": row[1],
+                    "display_name": row[6] or row[1],
+                    "content": row[2],
+                    "timestamp": row[3],
+                    "message_type": row[4],
+                    "room": row[5] or 'general'
+                })
             return messages
     except Exception as e:
         logger.error(f"Failed to retrieve history: {e}")
