@@ -80,12 +80,12 @@ AGENT_SANDBOXES = {
     'manus_agent_102': {'sandbox_id': 'iibsk5hadqjovru23b24y', 'display_name': 'DATA_S'},
     'manus_agent_103': {'sandbox_id': 'iw73ydx3wc3wip55i81yq', 'display_name': 'ARCHIT'},
     'manus_agent_104': {'sandbox_id': 'iqmoujlkxxqjvmohgo43z', 'display_name': 'DEVELO'},
-    # Mettis AI Sales Team
-    'manus_agent_200': {'sandbox_id': 'ij3w19hzq1vk2w395ptmx', 'display_name': 'ATLAS'},
-    'manus_agent_201': {'sandbox_id': 'ir3dhcn6tr6trwtl8loo2', 'display_name': 'VEGA'},
-    'manus_agent_202': {'sandbox_id': 'i9enmjvh4veg0do038ki8', 'display_name': 'ORION'},
-    'manus_agent_203': {'sandbox_id': 'i6xv4z1dbwepqa7ffan39', 'display_name': 'NEXUS'},
-    'manus_agent_204': {'sandbox_id': 'ips6eyu8yt8bfdeg5domo', 'display_name': 'LYRIC'},  # Updated 2026-02-24
+    # Mettis AI Sales Team — Updated 2026-02-25 with envd tokens
+    'manus_agent_200': {'sandbox_id': 'ij3w19hzq1vk2w395ptmx', 'display_name': 'ATLAS', 'envd_access_token': '306cf91cc67f0f172988d83a705e27b31a7e63aa4abf087d006fd43800a1d772'},
+    'manus_agent_201': {'sandbox_id': 'ir3dhcn6tr6trwtl8loo2', 'display_name': 'VEGA', 'envd_access_token': '64be083b846fa90108ee73c96198a810c1b3a1ca431cb751b5b3f0ce63214e92'},
+    'manus_agent_202': {'sandbox_id': 'i9enmjvh4veg0do038ki8', 'display_name': 'ORION', 'envd_access_token': '60ac73428bdb7dc6f3af913fdbd262e9f9004abaa72f0562eccf96ad3faae637'},
+    'manus_agent_203': {'sandbox_id': 'i6xv4z1dbwepqa7ffan39', 'display_name': 'NEXUS', 'envd_access_token': '8a82f135df96fe2a4bde144dda67b893f177c3e00f147dba2783b3dec233852a'},
+    'manus_agent_204': {'sandbox_id': 'ips6eyu8yt8bfdeg5domo', 'display_name': 'LYRIC', 'envd_access_token': 'f6801b069e9f9a83da2caaedf7af4029ec674bbc2e4718e4217dfb6ee9382805'},
 }
 
 # Max history messages returned per room on connect
@@ -1004,7 +1004,8 @@ async def handle_client(websocket):
                         [_sys.executable, '-c',
                          f'import os; os.environ["E2B_API_KEY"]="{E2B_API_KEY}"; '
                          f'from e2b import Sandbox; sbx=Sandbox.connect("{sandbox_id}"); '
-                         f'print(sbx._SandboxBase__envd_access_token or "")'],
+                         f'token=getattr(sbx,"_envd_access_token",None) or getattr(sbx,"_SandboxBase__envd_access_token",None) or ""; '
+                         f'print(token)'],
                         capture_output=True, text=True, timeout=15
                     )
                     envd_access_token = _result.stdout.strip()
