@@ -371,7 +371,13 @@ def _get_envd_token(agent_id: str) -> str:
 
 
 def get_workspace_files(sandbox_id: str, directory: str = '/tmp/manus_assets', envd_access_token: str = '') -> list:
-    """List files in an agent's E2B sandbox workspace via SDK gRPC (handles auth automatically)."""
+    """List files in an agent's E2B sandbox workspace.
+    Supports both v3 (/home/ubuntu/workspace/docs/) and v2 (/tmp/manus_assets/) paths."""
+    # If default directory requested, try v3 first then v2
+    if directory == '/tmp/manus_assets':
+        v3_files = _envd_list_dir(sandbox_id, '/home/ubuntu/workspace/docs', envd_access_token)
+        if v3_files:
+            return v3_files
     return _envd_list_dir(sandbox_id, directory, envd_access_token)
 
 
@@ -384,14 +390,21 @@ def get_workspace_file_content(sandbox_id: str, path: str, envd_access_token: st
 
 
 def get_workspace_terminal(sandbox_id: str, agent_id: str, lines: int = 50, envd_access_token: str = '') -> str:
-    """Get the last N lines of an agent's terminal log via direct envd HTTP API."""
-    try:
-        log_path = f"/tmp/agent_{agent_id}.log"
-        content = _envd_read_file(sandbox_id, log_path, envd_access_token).decode('utf-8', errors='replace')
-        log_lines = content.split('\n')
-        return '\n'.join(log_lines[-lines:])
-    except Exception as e:
-        return f"Error: {e}"
+    """Get the last N lines of an agent's terminal log via direct envd HTTP API.
+    Supports both v2 (/tmp/agent_*.log) and v3 (/home/ubuntu/memory/agent.log) paths."""
+    # Try v3 path first, then v2 fallback
+    log_paths = [
+        '/home/ubuntu/memory/agent.log',
+        f'/tmp/agent_{agent_id}.log',
+    ]
+    for log_path in log_paths:
+        try:
+            content = _envd_read_file(sandbox_id, log_path, envd_access_token).decode('utf-8', errors='replace')
+            log_lines = content.split('\n')
+            return '\n'.join(log_lines[-lines:])
+        except Exception:
+            continue
+    return 'No log available'
 
 
 def get_workspace_screenshot(sandbox_id: str, envd_access_token: str = '') -> dict:
@@ -444,31 +457,53 @@ def get_workspace_activity(sandbox_id: str, agent_id: str, envd_access_token: st
     Modes: 'browse' (browser screenshot), 'edit' (file content), 'run' (terminal), 'think' (LLM), 'idle'"""
     import base64 as _b64, re as _re
     try:
-        # Read last 60 lines of log
-        log_path = f'/tmp/agent_{agent_id}.log'
-        raw_log = _envd_read_file(sandbox_id, log_path, envd_access_token).decode('utf-8', errors='replace')
+        # Read last 60 lines of log — try v3 path first, then v2 fallback
+        raw_log = ''
+        for log_path in ['/home/ubuntu/memory/agent.log', f'/tmp/agent_{agent_id}.log']:
+            try:
+                raw_log = _envd_read_file(sandbox_id, log_path, envd_access_token).decode('utf-8', errors='replace')
+                if raw_log.strip():
+                    break
+            except Exception:
+                continue
         lines = [l for l in raw_log.split('\n') if l.strip()][-60:]
         last_lines = '\n'.join(lines)
 
         # Extract last few step lines for the step log
         step_lines = []
+        # v3 keywords + v2 keywords for backward compatibility
+        V3_KEYWORDS = ['[PLAN]', '[EXECUTE]', '[TOOL]', '[RESULT]', '[DONE]', '[THINK]', '[WRITE]', '[BROWSE]', '[SEARCH]', '[EXEC]', '[CHAT]', '[MEMORY]', '[ERROR]']
+        V2_KEYWORDS = ['Ejecutando:', '[SENT', 'LLM [', '[RECONECT]', 'Escrito:', 'DOC SYNC', 'Follow-up', 'TRUNCADO', 'Conectando']
         for line in lines[-30:]:
-            if any(kw in line for kw in ['Ejecutando:', '[SENT', 'LLM [', '[RECONECT]', 'Escrito:', 'DOC SYNC', 'Follow-up', 'TRUNCADO', 'Conectando']):
+            if any(kw in line for kw in V3_KEYWORDS + V2_KEYWORDS):
                 # Clean timestamp
-                clean = _re.sub(r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+ ', '', line).strip()
-                # Format nicely for terminal display
-                if 'Ejecutando: browse' in clean:
+                clean = _re.sub(r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[,.]\d+ ', '', line).strip()
+                clean = _re.sub(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[.\d]*Z?\s*', '', clean).strip()
+                # Format nicely for terminal display — v3 patterns
+                if '[BROWSE]' in clean or 'Ejecutando: browse' in clean:
                     clean = '🌐 ' + clean
-                elif 'Ejecutando: search' in clean:
+                elif '[SEARCH]' in clean or 'Ejecutando: search' in clean:
                     clean = '🔍 ' + clean
-                elif 'Ejecutando: write' in clean or 'Escrito:' in clean:
+                elif '[WRITE]' in clean or 'Ejecutando: write' in clean or 'Escrito:' in clean:
                     clean = '✏️ ' + clean
-                elif 'DOC SYNC' in clean:
-                    clean = '📄 ' + clean
-                elif 'LLM [' in clean:
+                elif '[EXEC]' in clean or 'Ejecutando: python' in clean or 'Ejecutando: bash' in clean:
+                    clean = '⚙️ ' + clean
+                elif '[PLAN]' in clean:
+                    clean = '📋 ' + clean
+                elif '[EXECUTE]' in clean:
+                    clean = '▶️ ' + clean
+                elif '[TOOL]' in clean:
+                    clean = '🔧 ' + clean
+                elif '[RESULT]' in clean or '[DONE]' in clean:
+                    clean = '✅ ' + clean
+                elif '[THINK]' in clean or 'LLM [' in clean:
                     clean = '🧠 ' + clean
-                elif '[SENT' in clean:
+                elif '[CHAT]' in clean or '[SENT' in clean:
                     clean = '💬 ' + clean
+                elif '[MEMORY]' in clean or 'DOC SYNC' in clean:
+                    clean = '📄 ' + clean
+                elif '[ERROR]' in clean:
+                    clean = '❌ ' + clean
                 elif '[RECONECT]' in clean:
                     clean = '🔄 ' + clean
                 step_lines.append(clean)
@@ -479,36 +514,37 @@ def get_workspace_activity(sandbox_id: str, agent_id: str, envd_access_token: st
         current_url = ''
         current_file = ''
 
-        # Scan lines in reverse to find the most recent action
+        # Scan lines in reverse to find the most recent action (v3 + v2 patterns)
         for line in reversed(lines):
-            if 'Ejecutando: browse' in line:
+            # v3 patterns
+            if '[BROWSE]' in line or 'Ejecutando: browse' in line:
                 mode = 'browse'
-                # Extract URL if present
                 url_match = _re.search(r'https?://[^\s]+', line)
                 if url_match:
                     current_url = url_match.group(0)
                 break
-            elif 'Ejecutando: search' in line:
+            elif '[SEARCH]' in line or 'Ejecutando: search' in line:
                 mode = 'search'
-                # Extract search query from the line
-                q_match = _re.search(r'search[:\s]+["\']?([^"\'\n]+)', line, _re.IGNORECASE)
+                q_match = _re.search(r'(?:SEARCH|search)[:\s]+["\']?([^"\']\n]{3,80})', line, _re.IGNORECASE)
                 if q_match:
                     detail = q_match.group(1).strip()
                 break
-            elif 'Ejecutando: write_file' in line or 'Ejecutando: read_file' in line or 'Ejecutando: append_file' in line:
+            elif '[WRITE]' in line or 'Ejecutando: write_file' in line or 'Ejecutando: read_file' in line or 'Ejecutando: append_file' in line:
                 mode = 'edit'
-                # Extract file path
-                path_match = _re.search(r'[/\w]+\.[a-z]+', line)
+                path_match = _re.search(r'[/\w.-]+\.[a-zA-Z]+', line)
                 if path_match:
                     current_file = path_match.group(0)
                 break
-            elif 'Ejecutando: python' in line or 'Ejecutando: bash' in line or 'Ejecutando: shell' in line:
+            elif '[EXEC]' in line or 'Ejecutando: python' in line or 'Ejecutando: bash' in line or 'Ejecutando: shell' in line:
                 mode = 'run'
                 break
-            elif 'LLM [REACT]' in line or 'LLM [CHAT]' in line:
+            elif '[PLAN]' in line or '[EXECUTE]' in line:
                 mode = 'think'
                 break
-            elif '[SENT' in line:
+            elif '[THINK]' in line or 'LLM [REACT]' in line or 'LLM [CHAT]' in line or 'LLM [PRECISE]' in line:
+                mode = 'think'
+                break
+            elif '[CHAT]' in line or '[SENT' in line:
                 mode = 'think'
                 break
 
@@ -560,18 +596,35 @@ def get_workspace_activity(sandbox_id: str, agent_id: str, envd_access_token: st
                 pass
 
         # Always try to get the most recently modified file as fallback for edit mode
+        # Check v3 path (/home/ubuntu/workspace/docs/) first, then v2 (/tmp/manus_assets/)
         if mode in ('edit', 'idle') and not result.get('file_content'):
+            for workspace_dir in ['/home/ubuntu/workspace/docs', '/tmp/manus_assets']:
+                try:
+                    file_list = _envd_list_dir(sandbox_id, workspace_dir, envd_access_token)
+                    file_list = [f for f in file_list if f.get('type') == 'FILE' and not f['name'].endswith('.png')]
+                    if file_list:
+                        latest = sorted(file_list, key=lambda f: f.get('modified', ''), reverse=True)[0]
+                        content = _envd_read_file(sandbox_id, latest['path'], envd_access_token).decode('utf-8', errors='replace')
+                        result['file_content'] = content[:8000]
+                        result['file_name'] = latest['name']
+                        result['file_path'] = latest['path']
+                        if mode == 'idle':
+                            result['mode'] = 'edit'
+                        break
+                except Exception:
+                    continue
+        # Also try to read todo.md for v3 agents (shows current plan)
+        if not result.get('todo_content'):
             try:
-                file_list = _envd_list_dir(sandbox_id, '/tmp/manus_assets', envd_access_token)
-                file_list = [f for f in file_list if f.get('type') == 'FILE' and not f['name'].endswith('.png')]
-                if file_list:
-                    latest = sorted(file_list, key=lambda f: f.get('modified', ''), reverse=True)[0]
-                    content = _envd_read_file(sandbox_id, latest['path'], envd_access_token).decode('utf-8', errors='replace')
-                    result['file_content'] = content[:8000]
-                    result['file_name'] = latest['name']
-                    result['file_path'] = latest['path']
-                    if mode == 'idle':
-                        result['mode'] = 'edit'
+                todo_raw = _envd_read_file(sandbox_id, '/home/ubuntu/workspace/todo.md', envd_access_token).decode('utf-8', errors='replace')
+                result['todo_content'] = todo_raw[:3000]
+            except Exception:
+                pass
+        # Try to read status.json for v3 agents
+        if not result.get('agent_status'):
+            try:
+                status_raw = _envd_read_file(sandbox_id, '/home/ubuntu/memory/status.json', envd_access_token).decode('utf-8', errors='replace')
+                result['agent_status'] = json.loads(status_raw)
             except Exception:
                 pass
 
