@@ -1084,6 +1084,15 @@ async def handle_client(websocket):
                     }
                     await websocket.send(json.dumps(pong))
 
+                elif msg_type in ("TERMINAL", "BROWSER_STREAM", "STATUS"):
+                    # Real-time streaming from E2B sandboxes — broadcast but do NOT persist
+                    await broadcast_message(message, client_id)
+                    if msg_type == "TERMINAL":
+                        output = message.get("data", {}).get("output", "")[:80]
+                        logger.debug(f"📟 TERMINAL from {client_id}: {output}")
+                    elif msg_type == "BROWSER_STREAM":
+                        logger.info(f"🌐 BROWSER_STREAM from {client_id}")
+
                 elif msg_type == "GOODBYE":
                     logger.info(f"👋 {client_id} said GOODBYE")
                     break
