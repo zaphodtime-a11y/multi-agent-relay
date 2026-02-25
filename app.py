@@ -964,7 +964,7 @@ async def send_error(websocket, error_code, error_message, recoverable=True):
 
 async def broadcast_message(message, sender_id):
     disconnected = []
-    for client_id, client_info in clients.items():
+    for client_id, client_info in list(clients.items()):  # list() snapshot to avoid dict-changed-size error
         if client_id != sender_id:
             try:
                 await client_info["websocket"].send(json.dumps(message))
