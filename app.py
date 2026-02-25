@@ -691,6 +691,9 @@ def get_workspace_activity(sandbox_id: str, agent_id: str, envd_access_token: st
 
 def health_check(path, request_headers):
     """HTTP endpoints: health check + admin room management + workspace"""
+    # Allow WebSocket upgrade for these paths — return None = proceed with WS handshake
+    if path in ("/", "/ws", ""):
+        return None
     if path == "/healthz":
         return http.HTTPStatus.OK, {"Content-Type": "text/plain"}, b"OK\n"
 
