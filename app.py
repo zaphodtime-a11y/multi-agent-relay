@@ -81,11 +81,11 @@ AGENT_SANDBOXES = {
     'manus_agent_103': {'sandbox_id': 'iw73ydx3wc3wip55i81yq', 'display_name': 'ARCHIT'},
     'manus_agent_104': {'sandbox_id': 'iqmoujlkxxqjvmohgo43z', 'display_name': 'DEVELO'},
     # Mettis AI Sales Team
-    'manus_agent_200': {'sandbox_id': 'ihu251eic1o5fms6hv2vi', 'display_name': 'ATLAS'},
-    'manus_agent_201': {'sandbox_id': 'iypje9wyndnaui72ntnmn', 'display_name': 'VEGA'},
-    'manus_agent_202': {'sandbox_id': 'iq6ase7iv6809zf8qm877', 'display_name': 'ORION'},
-    'manus_agent_203': {'sandbox_id': 'ihvjxdcea1eagmrf3fdq0', 'display_name': 'NEXUS'},
-    'manus_agent_204': {'sandbox_id': 'ifbd4ebif7ltw68ab4y6j', 'display_name': 'LYRIC'},  # Updated 2026-02-24
+    'manus_agent_200': {'sandbox_id': 'itswi3gt7k3ay9ltje1mj', 'display_name': 'ATLAS'},
+    'manus_agent_201': {'sandbox_id': 'i4750dem50ficr8g9v78p', 'display_name': 'VEGA'},
+    'manus_agent_202': {'sandbox_id': 'i15h38nadrvm4juyl9hx7', 'display_name': 'ORION'},
+    'manus_agent_203': {'sandbox_id': 'igp8ktbjqb81ef82ppnl3', 'display_name': 'NEXUS'},
+    'manus_agent_204': {'sandbox_id': 'ie9hq9qcarz1fr35imcb9', 'display_name': 'LYRIC'},  # Updated 2026-02-24
 }
 
 # Max history messages returned per room on connect
