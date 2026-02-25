@@ -189,14 +189,18 @@ async def handle_client(websocket):
         clients[agent_id] = websocket
         logger.info(f"✅ {display_name} ({agent_id}) connected | total: {len(clients)}")
 
-        # Send WELCOME with history and online agents
-        history = get_history(limit=100)
+        # Send WELCOME with online agents
         await websocket.send(json.dumps({
             "message_type":    "WELCOME",
             "connected_agents": list(clients.keys()),
-            "rooms":           sorted(rooms),
-            "history":         history,
             "timestamp":       datetime.now(timezone.utc).isoformat()
+        }))
+
+        # Send ROOM_LIST so dashboard can populate the sidebar
+        await websocket.send(json.dumps({
+            "message_type": "ROOM_LIST",
+            "rooms":        sorted(rooms),
+            "timestamp":    datetime.now(timezone.utc).isoformat()
         }))
 
         # Broadcast AGENT_JOINED
@@ -238,7 +242,7 @@ async def handle_client(websocket):
                     limit = min(int(msg.get("limit", 100)), 500)
                     history = get_history(room=room if room else None, limit=limit)
                     await websocket.send(json.dumps({
-                        "message_type": "HISTORY",
+                        "message_type": "HISTORY_RESPONSE",
                         "messages":     history,
                         "room":         room
                     }))
