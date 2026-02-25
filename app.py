@@ -391,7 +391,14 @@ def get_workspace_files(sandbox_id: str, directory: str = '/tmp/manus_assets', e
     Supports both v3 (/home/ubuntu/workspace/docs/) and v2 (/tmp/manus_assets/) paths."""
     # If default directory requested, try v3 first then v2
     if directory == '/tmp/manus_assets':
-        v3_files = _envd_list_dir(sandbox_id, '/home/ubuntu/workspace/docs', envd_access_token)
+        v3_files = []
+        for docs_path in ['/home/ubuntu/workspace/docs', '/home/user/workspace/docs']:
+            try:
+                v3_files = _envd_list_dir(sandbox_id, docs_path, envd_access_token)
+                if v3_files:
+                    break
+            except Exception:
+                continue
         if v3_files:
             return v3_files
     return _envd_list_dir(sandbox_id, directory, envd_access_token)
@@ -411,6 +418,7 @@ def get_workspace_terminal(sandbox_id: str, agent_id: str, lines: int = 50, envd
     # Try v3 path first, then v2 fallback
     log_paths = [
         '/home/ubuntu/memory/agent.log',
+        '/home/user/memory/agent.log',
         f'/tmp/agent_{agent_id}.log',
     ]
     for log_path in log_paths:
@@ -475,7 +483,7 @@ def get_workspace_activity(sandbox_id: str, agent_id: str, envd_access_token: st
     try:
         # Read last 60 lines of log — try v3 path first, then v2 fallback
         raw_log = ''
-        for log_path in ['/home/ubuntu/memory/agent.log', f'/tmp/agent_{agent_id}.log']:
+        for log_path in ['/home/ubuntu/memory/agent.log', '/home/user/memory/agent.log', f'/tmp/agent_{agent_id}.log']:
             try:
                 raw_log = _envd_read_file(sandbox_id, log_path, envd_access_token).decode('utf-8', errors='replace')
                 if raw_log.strip():
@@ -614,7 +622,7 @@ def get_workspace_activity(sandbox_id: str, agent_id: str, envd_access_token: st
         # Always try to get the most recently modified file as fallback for edit mode
         # Check v3 path (/home/ubuntu/workspace/docs/) first, then v2 (/tmp/manus_assets/)
         if mode in ('edit', 'idle') and not result.get('file_content'):
-            for workspace_dir in ['/home/ubuntu/workspace/docs', '/tmp/manus_assets']:
+            for workspace_dir in ['/home/ubuntu/workspace/docs', '/home/user/workspace/docs', '/tmp/manus_assets']:
                 try:
                     file_list = _envd_list_dir(sandbox_id, workspace_dir, envd_access_token)
                     file_list = [f for f in file_list if f.get('type') == 'FILE' and not f['name'].endswith('.png')]
@@ -632,14 +640,30 @@ def get_workspace_activity(sandbox_id: str, agent_id: str, envd_access_token: st
         # Also try to read todo.md for v3 agents (shows current plan)
         if not result.get('todo_content'):
             try:
-                todo_raw = _envd_read_file(sandbox_id, '/home/ubuntu/workspace/todo.md', envd_access_token).decode('utf-8', errors='replace')
+                todo_raw = None
+                for todo_path in ['/home/ubuntu/workspace/todo.md', '/home/user/workspace/todo.md']:
+                    try:
+                        todo_raw = _envd_read_file(sandbox_id, todo_path, envd_access_token).decode('utf-8', errors='replace')
+                        break
+                    except Exception:
+                        continue
+                if todo_raw is None:
+                    raise Exception('todo.md not found')
                 result['todo_content'] = todo_raw[:3000]
             except Exception:
                 pass
         # Try to read status.json for v3 agents
         if not result.get('agent_status'):
             try:
-                status_raw = _envd_read_file(sandbox_id, '/home/ubuntu/memory/status.json', envd_access_token).decode('utf-8', errors='replace')
+                status_raw = None
+                for status_path in ['/home/ubuntu/memory/status.json', '/home/user/memory/status.json']:
+                    try:
+                        status_raw = _envd_read_file(sandbox_id, status_path, envd_access_token).decode('utf-8', errors='replace')
+                        break
+                    except Exception:
+                        continue
+                if status_raw is None:
+                    raise Exception('status.json not found')
                 result['agent_status'] = json.loads(status_raw)
             except Exception:
                 pass
