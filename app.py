@@ -12,7 +12,7 @@ Features:
 - Graceful shutdown on SIGTERM
 - Room sync: ROOM_LIST on connect, ROOM_CREATED broadcast
 - Agent events: AGENT_JOINED / AGENT_LEFT broadcast
-"""
+""""
 
 import asyncio
 import websockets
@@ -53,6 +53,8 @@ E2B_API_KEY = os.environ.get('E2B_API_KEY', '')
 # Map of agent_id -> sandbox_id (updated dynamically via /workspace/register)
 # Pre-populated with known sandbox IDs
 AGENT_SANDBOXES = {
+    'agent_web_01': {'sandbox_id': 'i5dkik6c1fjw2yblwbsck', 'display_name': 'NEXUS'},
+    'agent_web_02': {'sandbox_id': 'i7mnjy5hpe5vq9aliiwq1', 'display_name': 'PULSE'},
     'manus_agent_042': {'sandbox_id': 'i21c45ih8yl020g5kfnmn', 'display_name': 'NOVA'},
     'manus_agent_043': {'sandbox_id': 'i4170jucfol3ru3fcx6a2', 'display_name': 'SPARK'},
     'manus_agent_044': {'sandbox_id': 'idnnle3hndtk42dyq3o49', 'display_name': 'LYRA'},
@@ -311,251 +313,117 @@ def purge_inactive_rooms(inactive_hours: int = 24):
         return []
 
 
-def _envd_url(sandbox_id: str) -> str:
-    """Return the envd HTTP API base URL for a sandbox."""
-    return f"https://49983-{sandbox_id}.e2b.app"
-
-
-def _envd_read_file(sandbox_id: str, path: str, envd_access_token: str = '') -> bytes:
-    """Read a file from the envd HTTP API using X-Access-Token header."""
-    import urllib.request
-    url = f"{_envd_url(sandbox_id)}/files?path={urllib.parse.quote(path)}"
-    headers = {}
-    if envd_access_token:
-        headers['X-Access-Token'] = envd_access_token
-    req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        return resp.read()
-
-
-def _envd_list_dir(sandbox_id: str, directory: str, envd_access_token: str = '') -> list:
-    """List files in a directory using envd gRPC HTTP API (connect protocol, fast)."""
+def get_workspace_files(sandbox_id: str, directory: str = '/tmp/manus_assets') -> list:
+    """List files in an agent's E2B sandbox workspace."""
     try:
-        import urllib.request
-        url = f"{_envd_url(sandbox_id)}/filesystem.Filesystem/ListDir"
-        body = json.dumps({'path': directory}).encode()
-        headers = {
-            'Content-Type': 'application/json',
-            'Connect-Protocol-Version': '1'
-        }
-        if envd_access_token:
-            headers['X-Access-Token'] = envd_access_token
-        req = urllib.request.Request(url, data=body, headers=headers)
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-        result = []
-        for f in data.get('entries', []):
-            result.append({
-                'name': f.get('name', ''),
-                'path': f.get('path', ''),
-                'size': int(f.get('size', 0)),
-                'type': 'FILE' if f.get('type') == 'FILE_TYPE_FILE' else 'DIR',
-                'modified': f.get('modifiedTime', '')
-            })
-        return result
+        import subprocess, json as _json
+        result = subprocess.run(
+            ['python3', '-c',
+             f'''
+import os, json
+os.environ["E2B_API_KEY"] = "{E2B_API_KEY}"
+from e2b import Sandbox
+sbx = Sandbox.connect("{sandbox_id}", api_key="{E2B_API_KEY}")
+try:
+    files = sbx.files.list("{directory}")
+    out = []
+    for f in files:
+        out.append({{
+            "name": f.name,
+            "path": f.path,
+            "size": f.size,
+            "type": str(f.type).split(".")[-1],
+            "modified": f.modified_time.isoformat() if f.modified_time else ""
+        }})
+    print(json.dumps(out))
+except Exception as e:
+    print(json.dumps([]))
+'''],
+            capture_output=True, text=True, timeout=15
+        )
+        return json.loads(result.stdout.strip() or '[]')
     except Exception as e:
-        logger.error(f"envd list_dir error: {e}")
+        logger.error(f"workspace files error: {e}")
         return []
 
 
-def _get_envd_token(agent_id: str) -> str:
-    """Get the envd_access_token for an agent, if stored."""
-    info = AGENT_SANDBOXES.get(agent_id, {})
-    return info.get('envd_access_token', '')
-
-
-def get_workspace_files(sandbox_id: str, directory: str = '/tmp/manus_assets', envd_access_token: str = '') -> list:
-    """List files in an agent's E2B sandbox workspace via SDK gRPC (handles auth automatically)."""
-    return _envd_list_dir(sandbox_id, directory, envd_access_token)
-
-
-def get_workspace_file_content(sandbox_id: str, path: str, envd_access_token: str = '') -> str:
-    """Read a file from an agent's E2B sandbox via direct envd HTTP API."""
+def get_workspace_file_content(sandbox_id: str, path: str) -> str:
+    """Read a file from an agent's E2B sandbox."""
     try:
-        return _envd_read_file(sandbox_id, path, envd_access_token).decode('utf-8', errors='replace')
+        import subprocess
+        result = subprocess.run(
+            ['python3', '-c',
+             f'''
+import os
+os.environ["E2B_API_KEY"] = "{E2B_API_KEY}"
+from e2b import Sandbox
+sbx = Sandbox.connect("{sandbox_id}", api_key="{E2B_API_KEY}")
+try:
+    content = sbx.files.read("{path}")
+    print(content)
+except Exception as e:
+    print(f"Error reading file: {{e}}")
+'''],
+            capture_output=True, text=True, timeout=15
+        )
+        return result.stdout
     except Exception as e:
         return f"Error: {e}"
 
 
-def get_workspace_terminal(sandbox_id: str, agent_id: str, lines: int = 50, envd_access_token: str = '') -> str:
-    """Get the last N lines of an agent's terminal log via direct envd HTTP API."""
+def get_workspace_terminal(sandbox_id: str, agent_id: str, lines: int = 50) -> str:
+    """Get the last N lines of an agent's terminal log."""
     try:
-        log_path = f"/tmp/agent_{agent_id}.log"
-        content = _envd_read_file(sandbox_id, log_path, envd_access_token).decode('utf-8', errors='replace')
-        log_lines = content.split('\n')
-        return '\n'.join(log_lines[-lines:])
+        import subprocess
+        result = subprocess.run(
+            ['python3', '-c',
+             f'''
+import os
+os.environ["E2B_API_KEY"] = "{E2B_API_KEY}"
+from e2b import Sandbox
+sbx = Sandbox.connect("{sandbox_id}", api_key="{E2B_API_KEY}")
+try:
+    r = sbx.commands.run("tail -{lines} /home/user/agent.log 2>/dev/null", timeout=8)
+    print(r.stdout or "")
+except Exception as e:
+    print(f"Error: {{e}}")
+'''],
+            capture_output=True, text=True, timeout=20
+        )
+        return result.stdout
     except Exception as e:
         return f"Error: {e}"
 
 
-def get_workspace_screenshot(sandbox_id: str, envd_access_token: str = '') -> dict:
-    """Get the browser screenshot (browser_view.png) or most recently modified file.
-    Returns image as base64 if it's a PNG, otherwise returns text content."""
-    import base64 as _b64
+def get_workspace_screenshot(sandbox_id: str) -> dict:
+    """Take a screenshot of the agent's sandbox and return as base64 PNG."""
     try:
-        directory = '/tmp/manus_assets'
-        # First try to get browser_view.png specifically
-        browser_view_path = '/tmp/manus_assets/browser_view.png'
-        try:
-            img_bytes = _envd_read_file(sandbox_id, browser_view_path, envd_access_token)
-            return {
-                "type": "image",
-                "path": browser_view_path,
-                "name": "browser_view.png",
-                "content": _b64.b64encode(img_bytes).decode('ascii')
-            }
-        except Exception:
-            pass  # Fall through to most-recent-file approach
-        # Fallback: most recently modified file
-        file_list = _envd_list_dir(sandbox_id, directory, envd_access_token)
-        file_list = [f for f in file_list if f.get('type') == 'FILE']
-        if not file_list:
-            return {"type": "empty", "message": "No files in workspace"}
-        latest = sorted(file_list, key=lambda f: f.get('modified', ''), reverse=True)[0]
-        raw = _envd_read_file(sandbox_id, latest['path'], envd_access_token)
-        if latest['name'].lower().endswith('.png'):
-            return {
-                "type": "image",
-                "path": latest['path'],
-                "name": latest['name'],
-                "content": _b64.b64encode(raw).decode('ascii')
-            }
-        content = raw.decode('utf-8', errors='replace')
-        return {
-            "type": "file",
-            "path": latest['path'],
-            "name": latest['name'],
-            "size": latest.get('size', 0),
-            "modified": latest.get('modified', ''),
-            "content": content[:8000]
-        }
+        import subprocess
+        result = subprocess.run(
+            ['python3', '-c',
+             f'''
+import os, base64
+os.environ["E2B_API_KEY"] = "{E2B_API_KEY}"
+from e2b import Sandbox
+sbx = Sandbox.connect("{sandbox_id}", api_key="{E2B_API_KEY}")
+try:
+    r = sbx.commands.run("scrot -z /tmp/_screenshot.png 2>/dev/null && base64 -w0 /tmp/_screenshot.png 2>/dev/null", timeout=10)
+    if r.stdout and len(r.stdout) > 100:
+        print("OK:" + r.stdout.strip())
+    else:
+        print("NOSCREEN")
+except Exception as e:
+    print(f"ERROR:{{e}}")
+'''],
+            capture_output=True, text=True, timeout=25
+        )
+        out = result.stdout.strip()
+        if out.startswith("OK:"):
+            return {"type": "screenshot", "format": "png", "data": out[3:]}
+        else:
+            return {"type": "error", "message": out}
     except Exception as e:
         return {"type": "error", "message": str(e)}
-
-
-def get_workspace_activity(sandbox_id: str, agent_id: str, envd_access_token: str = '') -> dict:
-    """Parse the agent log to determine current activity mode and return relevant content.
-    Modes: 'browse' (browser screenshot), 'edit' (file content), 'run' (terminal), 'think' (LLM), 'idle'"""
-    import base64 as _b64, re as _re
-    try:
-        # Read last 60 lines of log
-        log_path = f'/tmp/agent_{agent_id}.log'
-        raw_log = _envd_read_file(sandbox_id, log_path, envd_access_token).decode('utf-8', errors='replace')
-        lines = [l for l in raw_log.split('\n') if l.strip()][-60:]
-        last_lines = '\n'.join(lines)
-
-        # Extract last few step lines for the step log
-        step_lines = []
-        for line in lines[-20:]:
-            if 'Ejecutando:' in line or '[SENT' in line or 'LLM [' in line or '[RECONECT]' in line:
-                # Clean timestamp
-                clean = _re.sub(r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+ ', '', line).strip()
-                step_lines.append(clean)
-
-        # Determine current mode from most recent action
-        mode = 'idle'
-        detail = ''
-        current_url = ''
-        current_file = ''
-
-        # Scan lines in reverse to find the most recent action
-        for line in reversed(lines):
-            if 'Ejecutando: browse' in line:
-                mode = 'browse'
-                # Extract URL if present
-                url_match = _re.search(r'https?://[^\s]+', line)
-                if url_match:
-                    current_url = url_match.group(0)
-                break
-            elif 'Ejecutando: search' in line:
-                mode = 'search'
-                # Extract search query from the line
-                q_match = _re.search(r'search[:\s]+["\']?([^"\'\n]+)', line, _re.IGNORECASE)
-                if q_match:
-                    detail = q_match.group(1).strip()
-                break
-            elif 'Ejecutando: write_file' in line or 'Ejecutando: read_file' in line or 'Ejecutando: append_file' in line:
-                mode = 'edit'
-                # Extract file path
-                path_match = _re.search(r'[/\w]+\.[a-z]+', line)
-                if path_match:
-                    current_file = path_match.group(0)
-                break
-            elif 'Ejecutando: python' in line or 'Ejecutando: bash' in line or 'Ejecutando: shell' in line:
-                mode = 'run'
-                break
-            elif 'LLM [REACT]' in line or 'LLM [CHAT]' in line:
-                mode = 'think'
-                break
-            elif '[SENT' in line:
-                mode = 'think'
-                break
-
-        result = {
-            'mode': mode,
-            'step_log': step_lines[-10:],
-            'current_url': current_url,
-            'current_file': current_file,
-        }
-
-        # If browse mode, try to get browser screenshot
-        if mode == 'browse':
-            try:
-                img_bytes = _envd_read_file(sandbox_id, '/tmp/manus_assets/browser_view.png', envd_access_token)
-                result['screenshot'] = _b64.b64encode(img_bytes).decode('ascii')
-            except Exception:
-                pass
-        # If search mode, extract recent search queries and results from log
-        if mode == 'search':
-            search_entries = []
-            current_query = None
-            for line in lines:
-                # Detect search execution line
-                if 'Ejecutando: search' in line:
-                    q_match = _re.search(r'search[:\s]+["\']?([^"\'\n]{3,80})', line, _re.IGNORECASE)
-                    current_query = q_match.group(1).strip() if q_match else 'Searching...'
-                # Detect Follow-up search line (contains the query)
-                elif 'Follow-up search:' in line:
-                    q_match = _re.search(r'Follow-up search:\s*[•\-]?\s*(.+)', line)
-                    if q_match:
-                        current_query = q_match.group(1).strip()[:80]
-                        search_entries.append({'query': current_query, 'result': ''})
-                # Detect search result lines (SENT messages after a search)
-                elif '[SENT' in line and current_query and search_entries:
-                    result_match = _re.search(r'\[SENT[^\]]+\]\s*(.+)', line)
-                    if result_match and not search_entries[-1]['result']:
-                        search_entries[-1]['result'] = result_match.group(1).strip()[:200]
-            result['search_entries'] = search_entries[-5:] if search_entries else []
-            result['search_query'] = detail or (search_entries[-1]['query'] if search_entries else 'Searching...')
-
-        # If edit mode, try to get the file content
-        if mode == 'edit' and current_file:
-            try:
-                content = _envd_read_file(sandbox_id, current_file, envd_access_token).decode('utf-8', errors='replace')
-                result['file_content'] = content[:8000]
-                result['file_name'] = current_file.split('/')[-1]
-            except Exception:
-                pass
-
-        # Always try to get the most recently modified file as fallback for edit mode
-        if mode in ('edit', 'idle') and not result.get('file_content'):
-            try:
-                file_list = _envd_list_dir(sandbox_id, '/tmp/manus_assets', envd_access_token)
-                file_list = [f for f in file_list if f.get('type') == 'FILE' and not f['name'].endswith('.png')]
-                if file_list:
-                    latest = sorted(file_list, key=lambda f: f.get('modified', ''), reverse=True)[0]
-                    content = _envd_read_file(sandbox_id, latest['path'], envd_access_token).decode('utf-8', errors='replace')
-                    result['file_content'] = content[:8000]
-                    result['file_name'] = latest['name']
-                    result['file_path'] = latest['path']
-                    if mode == 'idle':
-                        result['mode'] = 'edit'
-            except Exception:
-                pass
-
-        return result
-    except Exception as e:
-        return {'mode': 'idle', 'step_log': [], 'error': str(e)}
 
 
 def health_check(path, request_headers):
@@ -614,7 +482,7 @@ def health_check(path, request_headers):
 
     # Workspace: list files for an agent
     # GET /workspace/{agent_id}?dir=/tmp/manus_assets
-    if path.startswith("/workspace/") and "/file" not in path and "/terminal" not in path and "/register" not in path and "/screenshot" not in path and "/activity" not in path:
+    if path.startswith("/workspace/") and "/file" not in path and "/terminal" not in path and "/register" not in path:
         cors = {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"}
         parts = path.split("?")
         agent_id = parts[0].replace("/workspace/", "").strip("/")
@@ -623,8 +491,7 @@ def health_check(path, request_headers):
         if agent_id not in AGENT_SANDBOXES:
             return http.HTTPStatus.NOT_FOUND, cors, json.dumps({"error": f"Unknown agent: {agent_id}"}).encode()
         sandbox_id = AGENT_SANDBOXES[agent_id]['sandbox_id']
-        envd_token = _get_envd_token(agent_id)
-        files = get_workspace_files(sandbox_id, directory, envd_token)
+        files = get_workspace_files(sandbox_id, directory)
         body = json.dumps({
             "agent_id": agent_id,
             "display_name": AGENT_SANDBOXES[agent_id]['display_name'],
@@ -646,8 +513,7 @@ def health_check(path, request_headers):
         if not file_path:
             return http.HTTPStatus.BAD_REQUEST, cors, json.dumps({"error": "Missing path parameter"}).encode()
         sandbox_id = AGENT_SANDBOXES[agent_id]['sandbox_id']
-        envd_token = _get_envd_token(agent_id)
-        content = get_workspace_file_content(sandbox_id, file_path, envd_token)
+        content = get_workspace_file_content(sandbox_id, file_path)
         body = json.dumps({
             "agent_id": agent_id,
             "path": file_path,
@@ -666,8 +532,7 @@ def health_check(path, request_headers):
         if agent_id not in AGENT_SANDBOXES:
             return http.HTTPStatus.NOT_FOUND, cors, json.dumps({"error": f"Unknown agent: {agent_id}"}).encode()
         sandbox_id = AGENT_SANDBOXES[agent_id]['sandbox_id']
-        envd_token = _get_envd_token(agent_id)
-        terminal_output = get_workspace_terminal(sandbox_id, agent_id, lines, envd_token)
+        terminal_output = get_workspace_terminal(sandbox_id, agent_id, lines)
         body = json.dumps({
             "agent_id": agent_id,
             "display_name": AGENT_SANDBOXES[agent_id]['display_name'],
@@ -684,31 +549,13 @@ def health_check(path, request_headers):
         if agent_id not in AGENT_SANDBOXES:
             return http.HTTPStatus.NOT_FOUND, cors, json.dumps({"error": f"Unknown agent: {agent_id}"}).encode()
         sandbox_id = AGENT_SANDBOXES[agent_id]['sandbox_id']
-        envd_token = _get_envd_token(agent_id)
-        result = get_workspace_screenshot(sandbox_id, envd_token)
+        result = get_workspace_screenshot(sandbox_id)
         body = json.dumps({
             "agent_id": agent_id,
             "display_name": AGENT_SANDBOXES[agent_id]['display_name'],
             **result
         }).encode()
         return http.HTTPStatus.OK, cors, body
-    # Workspace: activity — current mode + content (auto-switching view)
-    # GET /workspace/{agent_id}/activity
-    if path.startswith("/workspace/") and "/activity" in path:
-        cors = {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"}
-        agent_id = path.replace("/workspace/", "").replace("/activity", "").strip("/").split("?")[0]
-        if agent_id not in AGENT_SANDBOXES:
-            return http.HTTPStatus.NOT_FOUND, cors, json.dumps({"error": f"Unknown agent: {agent_id}"}).encode()
-        sandbox_id = AGENT_SANDBOXES[agent_id]['sandbox_id']
-        envd_token = _get_envd_token(agent_id)
-        result = get_workspace_activity(sandbox_id, agent_id, envd_token)
-        body = json.dumps({
-            "agent_id": agent_id,
-            "display_name": AGENT_SANDBOXES[agent_id]['display_name'],
-            **result
-        }).encode()
-        return http.HTTPStatus.OK, cors, body
-
     # Workspace: register/update sandbox ID for an agent
     # GET /workspace/register?agent_id=manus_agent_042&sandbox_id=abc123&secret=KEY
     if path.startswith("/workspace/register"):
@@ -723,13 +570,8 @@ def health_check(path, request_headers):
         display_name = params.get('display_name', [agent_id])[0]
         if not agent_id or not sandbox_id:
             return http.HTTPStatus.BAD_REQUEST, cors, json.dumps({"error": "Missing agent_id or sandbox_id"}).encode()
-        envd_access_token = params.get('envd_access_token', [''])[0]
-        AGENT_SANDBOXES[agent_id] = {
-            'sandbox_id': sandbox_id,
-            'display_name': display_name,
-            'envd_access_token': envd_access_token
-        }
-        logger.info(f"📦 Workspace registered: {agent_id} -> {sandbox_id} (token={'yes' if envd_access_token else 'no'})")
+        AGENT_SANDBOXES[agent_id] = {'sandbox_id': sandbox_id, 'display_name': display_name}
+        logger.info(f"📦 Workspace registered: {agent_id} -> {sandbox_id}")
         body = json.dumps({"ok": True, "agent_id": agent_id, "sandbox_id": sandbox_id}).encode()
         return http.HTTPStatus.OK, cors, body
 
@@ -795,35 +637,6 @@ async def handle_client(websocket):
             "capabilities": hello_msg.get("capabilities", {}),
             "connected_at": datetime.now().isoformat()
         }
-
-        # Auto-register workspace credentials from HELLO message
-        sandbox_id = hello_msg.get("sandbox_id", "")
-        envd_access_token = hello_msg.get("envd_access_token", "")
-        display_name = hello_msg.get("display_name", client_id)
-        if sandbox_id:
-            existing = AGENT_SANDBOXES.get(client_id, {})
-            # If no token provided, try to fetch from E2B SDK (async, non-blocking)
-            if not envd_access_token and E2B_API_KEY:
-                try:
-                    import subprocess as _sp, sys as _sys
-                    _result = _sp.run(
-                        [_sys.executable, '-c',
-                         f'import os; os.environ["E2B_API_KEY"]="{E2B_API_KEY}"; '
-                         f'from e2b import Sandbox; sbx=Sandbox.connect("{sandbox_id}"); '
-                         f'print(sbx._SandboxBase__envd_access_token or "")'],
-                        capture_output=True, text=True, timeout=15
-                    )
-                    envd_access_token = _result.stdout.strip()
-                    if envd_access_token:
-                        logger.info(f"🔑 Fetched envd token for {client_id} via SDK")
-                except Exception as _e:
-                    logger.warning(f"Could not fetch envd token for {client_id}: {_e}")
-            AGENT_SANDBOXES[client_id] = {
-                'sandbox_id': sandbox_id,
-                'display_name': display_name,
-                'envd_access_token': envd_access_token or existing.get('envd_access_token', '')
-            }
-            logger.info(f"📦 Auto-registered workspace for {client_id} -> {sandbox_id} (token={'yes' if envd_access_token else 'NO'})")
 
         welcome_msg = {
             "protocol_version": "0.3",
@@ -957,49 +770,12 @@ async def handle_client(websocket):
             logger.info(f"📢 Broadcasted AGENT_LEFT for {client_id}")
 
 
-def _fetch_envd_tokens_background():
-    """Fetch envd_access_token for all known sandboxes from E2B API at startup.
-    Runs in a background thread so it doesn't block the server from starting."""
-    if not E2B_API_KEY:
-        logger.warning("⚠️  E2B_API_KEY not set — workspace tokens will not be auto-fetched")
-        return
-    import time
-    time.sleep(3)  # Wait for server to fully start
-    logger.info("🔑 Auto-fetching envd tokens for all agents...")
-    try:
-        import subprocess, sys
-        for agent_id, info in list(AGENT_SANDBOXES.items()):
-            sandbox_id = info.get('sandbox_id', '')
-            if not sandbox_id or info.get('envd_access_token'):
-                continue  # Skip if already has token
-            try:
-                result = subprocess.run(
-                    [sys.executable, '-c',
-                     f'import os; os.environ["E2B_API_KEY"]="{E2B_API_KEY}"; '
-                     f'from e2b import Sandbox; sbx=Sandbox.connect("{sandbox_id}"); '
-                     f'print(sbx._SandboxBase__envd_access_token)'],
-                    capture_output=True, text=True, timeout=20
-                )
-                token = result.stdout.strip()
-                if token and len(token) == 64:
-                    AGENT_SANDBOXES[agent_id]['envd_access_token'] = token
-                    logger.info(f"  ✅ {info.get('display_name', agent_id)}: token fetched")
-                else:
-                    logger.warning(f"  ⚠️  {info.get('display_name', agent_id)}: bad token '{token[:20]}...'")
-            except Exception as e:
-                logger.warning(f"  ❌ {info.get('display_name', agent_id)}: {e}")
-    except Exception as e:
-        logger.error(f"Token auto-fetch failed: {e}")
-    logger.info("🔑 Token auto-fetch complete")
-
 async def main():
     logger.info("=" * 60)
     logger.info("🚀 Multi-Agent Relay Server v0.9 (Production)")
     logger.info("=" * 60)
+
     init_database()
-    # Start background token fetch (non-blocking)
-    import threading
-    threading.Thread(target=_fetch_envd_tokens_background, daemon=True).start()
 
     loop = asyncio.get_running_loop()
     stop = loop.create_future()
