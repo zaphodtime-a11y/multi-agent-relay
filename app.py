@@ -426,6 +426,40 @@ except Exception as e:
         return {"type": "error", "message": str(e)}
 
 
+def get_workspace_activity(sandbox_id: str, agent_id: str, display_name: str) -> dict:
+    """Read the agent's activity state from /tmp/agent_activity.json in the sandbox."""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ['python3', '-c',
+             f'''
+import os, json
+os.environ["E2B_API_KEY"] = "{E2B_API_KEY}"
+from e2b import Sandbox
+sbx = Sandbox.connect("{sandbox_id}", api_key="{E2B_API_KEY}")
+try:
+    content = sbx.files.read("/tmp/agent_activity.json")
+    print(content)
+except Exception as e:
+    print(json.dumps({{"mode": "idle", "step_log": [], "error": str(e)}}))
+'''],
+            capture_output=True, text=True, timeout=15
+        )
+        raw = result.stdout.strip()
+        if raw:
+            data = json.loads(raw)
+            # Ensure required fields exist
+            if 'mode' not in data:
+                data['mode'] = 'idle'
+            if 'step_log' not in data:
+                data['step_log'] = []
+            return data
+        return {"mode": "idle", "step_log": [], "agent_id": agent_id, "display_name": display_name}
+    except Exception as e:
+        logger.error(f"activity fetch error: {e}")
+        return {"mode": "idle", "step_log": [], "agent_id": agent_id, "display_name": display_name, "error": str(e)}
+
+
 def health_check(path, request_headers):
     """HTTP endpoints: health check + admin room management + workspace"""
     if path == "/healthz":
@@ -555,6 +589,19 @@ def health_check(path, request_headers):
             "display_name": AGENT_SANDBOXES[agent_id]['display_name'],
             **result
         }).encode()
+        return http.HTTPStatus.OK, cors, body
+    # Workspace: get agent activity state (mode, step_log, current_url, etc.)
+    # GET /workspace/{agent_id}/activity
+    if path.startswith("/workspace/") and "/activity" in path:
+        cors = {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"}
+        agent_id = path.replace("/workspace/", "").replace("/activity", "").strip("/").split("?")[0]
+        if agent_id not in AGENT_SANDBOXES:
+            return http.HTTPStatus.NOT_FOUND, cors, json.dumps({"error": f"Unknown agent: {agent_id}"}).encode()
+        sandbox_id = AGENT_SANDBOXES[agent_id]['sandbox_id']
+        display_name = AGENT_SANDBOXES[agent_id]['display_name']
+        # Try to read /tmp/agent_activity.json from the sandbox
+        activity_data = get_workspace_activity(sandbox_id, agent_id, display_name)
+        body = json.dumps(activity_data).encode()
         return http.HTTPStatus.OK, cors, body
     # Workspace: register/update sandbox ID for an agent
     # GET /workspace/register?agent_id=manus_agent_042&sandbox_id=abc123&secret=KEY
