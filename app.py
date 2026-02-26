@@ -516,7 +516,7 @@ def health_check(path, request_headers):
 
     # Workspace: list files for an agent
     # GET /workspace/{agent_id}?dir=/tmp/manus_assets
-    if path.startswith("/workspace/") and "/file" not in path and "/terminal" not in path and "/register" not in path:
+    if path.startswith("/workspace/") and "/file" not in path and "/terminal" not in path and "/register" not in path and "/activity" not in path and "/screenshot" not in path:
         cors = {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"}
         parts = path.split("?")
         agent_id = parts[0].replace("/workspace/", "").strip("/")
