@@ -53,8 +53,8 @@ E2B_API_KEY = os.environ.get('E2B_API_KEY', '')
 # Map of agent_id -> sandbox_id (updated dynamically via /workspace/register)
 # Pre-populated with known sandbox IDs
 AGENT_SANDBOXES = {
-    'agent_web_01': {'sandbox_id': 'itpzuluwodxilyqlz51eg', 'display_name': 'NEXUS'},
-    'agent_web_02': {'sandbox_id': 'i81dsizppiedoal546dyd', 'display_name': 'PULSE'},
+    'agent_web_01': {'sandbox_id': 'i6wbys54gu451u1mbi9fp', 'display_name': 'NEXUS'},
+    'agent_web_02': {'sandbox_id': 'i1pbhh797ze13wjyvj5en', 'display_name': 'PULSE'},
     'manus_agent_042': {'sandbox_id': 'i21c45ih8yl020g5kfnmn', 'display_name': 'NOVA'},
     'manus_agent_043': {'sandbox_id': 'i4170jucfol3ru3fcx6a2', 'display_name': 'SPARK'},
     'manus_agent_044': {'sandbox_id': 'idnnle3hndtk42dyq3o49', 'display_name': 'LYRA'},
