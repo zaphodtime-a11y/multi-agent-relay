@@ -12,7 +12,7 @@ Features:
 - Graceful shutdown on SIGTERM
 - Room sync: ROOM_LIST on connect, ROOM_CREATED broadcast
 - Agent events: AGENT_JOINED / AGENT_LEFT broadcast
-""""
+"""
 
 import asyncio
 import websockets
